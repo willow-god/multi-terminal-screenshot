@@ -1,0 +1,58 @@
+{
+  "id": "3513300",
+  "name": "多端预览",
+  "font_family": "iconfont",
+  "css_prefix_text": "icon-",
+  "description": "",
+  "glyphs": [
+    {
+      "icon_id": "1029233",
+      "name": "叉叉",
+      "font_class": "cancel-1-copy",
+      "unicode": "e61a",
+      "unicode_decimal": 58906
+    },
+    {
+      "icon_id": "5135",
+      "name": "数码手机",
+      "font_class": "shumashouji",
+      "unicode": "e600",
+      "unicode_decimal": 58880
+    },
+    {
+      "icon_id": "2716513",
+      "name": "已勾选32",
+      "font_class": "yigouxuan",
+      "unicode": "e63d",
+      "unicode_decimal": 58941
+    },
+    {
+      "icon_id": "2716516",
+      "name": "未勾选32",
+      "font_class": "weigouxuan",
+      "unicode": "e63e",
+      "unicode_decimal": 58942
+    },
+    {
+      "icon_id": "3865264",
+      "name": "电脑",
+      "font_class": "diannao",
+      "unicode": "e601",
+      "unicode_decimal": 58881
+    },
+    {
+      "icon_id": "4347539",
+      "name": "icon_网页",
+      "font_class": "icon_wangye",
+      "unicode": "eb8c",
+      "unicode_decimal": 60300
+    },
+    {
+      "icon_id": "14145065",
+      "name": "平板",
+      "font_class": "pingban",
+      "unicode": "e737",
+      "unicode_decimal": 59191
+    }
+  ]
+}
