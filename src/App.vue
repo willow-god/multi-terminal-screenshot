@@ -95,13 +95,13 @@ const coverShow = ref(false)
           </div>
           <transition name="fade">
             <div class="custom" v-if="customURL">
+              <div class="laptop">
+                <span><i class="iconfont icon-wangye"></i> 笔记本</span><span>https://</span><input type="text"
+                  placeholder="请输入网址" v-model.trim="laptop" class="url">
+              </div>
               <div class="phone">
                 <span><i class="iconfont icon-shumashouji"></i> 手机</span><span>https://</span><input type="text"
                   placeholder="请输入网址" v-model.trim="phone" class="url">
-              </div>
-              <div class="pad">
-                <span><i class="iconfont icon-pingban"></i> 平板</span><span>https://</span><input type="text"
-                  placeholder="请输入网址" v-model.trim="pad" class="url">
               </div>
               <div class="pad">
                 <span><i class="iconfont icon-pingban"></i> 平板</span><span>https://</span><input type="text"
