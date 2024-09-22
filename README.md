@@ -14,15 +14,15 @@
 ## 使用方法
 1. 克隆项目到本地：
    ```bash
-   git clone https://github.com/willow/multi-terminal-screenshot.git
+   git clone https://github.com/willow-god/multi-terminal-screenshot.git
    ```
 2. 安装依赖：
    ```bash
-   npm install
+   npm install --save
    ```
 3. 启动项目：
    ```bash
-   npm run serve
+   npm run dev
    ```
 4. 在浏览器中打开 `localhost:5173`，即可访问多端预览工具。
 
@@ -30,6 +30,9 @@
 - `src/`: 项目主要代码。
 - `public/`: 静态资源存放文件夹（如 favicon）。
 - `index.html`: 项目的 HTML 入口文件。
+
+## 效果展示
+![](./img/display.png)
 
 ## 贡献指南
 本项目欢迎任何形式的改进和建议！如果你有好的想法，欢迎提交 PR。
