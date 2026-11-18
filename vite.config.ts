@@ -1,8 +1,8 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// https://vitejs.dev/config/
+// 端影 · Vite 构建配置（文档：https://vitejs.dev/config/）
 export default defineConfig({
-  base:'/',
+  base: '/',
   plugins: [vue()]
 })
