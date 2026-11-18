@@ -270,6 +270,35 @@ export function posterSize(scale: number): { w: number; h: number } {
   return { w: Math.round(POSTER.w * scale), h: Math.round(POSTER.h * scale) }
 }
 
+/**
+ * 设备图（2 倍超采样，动辄 3000×3000）缩到海报尺寸是整条链路里最贵的一步，
+ * 拖一次设备要重绘几十帧，每帧都缩一遍根本跟不上鼠标。
+ * 这里按「设备 + 目标尺寸」缓存一份缩好的位图，之后每帧只做 1:1 贴图。
+ */
+const scaledCache = new Map<string, { src: HTMLCanvasElement; canvas: HTMLCanvasElement }>()
+
+function scaledDevice(
+  key: string,
+  src: HTMLCanvasElement,
+  dw: number,
+  dh: number,
+): HTMLCanvasElement {
+  const id = `${key}@${dw}x${dh}`
+  const hit = scaledCache.get(id)
+  if (hit && hit.src === src) return hit.canvas
+
+  const canvas = document.createElement('canvas')
+  canvas.width = dw
+  canvas.height = dh
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return src
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(src, 0, 0, dw, dh)
+  scaledCache.set(id, { src, canvas })
+  return canvas
+}
+
 /** 把若干设备合成到一张海报画布上（会重置画布尺寸）。 */
 export async function renderPoster(
   canvas: HTMLCanvasElement,
@@ -310,7 +339,9 @@ export async function renderPoster(
     const { x, y, w, h } = spec.poster
 
     // 投影已经烘进设备图里（半透明黑 + 模糊），这里直接贴，换画布底色都不会露馅
-    ctx.drawImage(device, x * k, y * k, w * k, h * k)
+    const dw = Math.round(w * k)
+    const dh = Math.round(h * k)
+    ctx.drawImage(scaledDevice(spec.key, device, dw, dh), x * k, y * k, dw, dh)
   }
 }
 

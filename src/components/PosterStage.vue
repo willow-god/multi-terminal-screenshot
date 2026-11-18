@@ -126,19 +126,40 @@ function nudge(event: KeyboardEvent, spec: DeviceSpec) {
   emit('move', spec.key, next.x, next.y)
 }
 
-let token = 0
+let rafId = 0
+let painting = false
+let dirty = false
 
-async function draw(): Promise<void> {
-  if (props.mode !== 'api') return
+async function paint(): Promise<void> {
   const canvas = canvasEl.value
   if (!canvas) return
-  const mine = ++token
   await renderPoster(canvas, props.specs, props.shots, {
     scale: 1,
     fit: props.fit,
     background: props.background,
   })
-  if (mine !== token) return
+}
+
+/**
+ * 拖拽时 pointermove 比屏幕刷新还密，合成一帧只画一次；
+ * 上一帧还没画完时只记个脏标记，画完再补最后一帧，避免重绘排队越拖越卡。
+ */
+function draw(): void {
+  if (props.mode !== 'api') return
+  dirty = true
+  if (rafId || painting) return
+  rafId = window.requestAnimationFrame(async () => {
+    rafId = 0
+    painting = true
+    try {
+      while (dirty) {
+        dirty = false
+        await paint()
+      }
+    } finally {
+      painting = false
+    }
+  })
 }
 
 watch(
@@ -169,6 +190,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   observer?.disconnect()
   observer = null
+  if (rafId) window.cancelAnimationFrame(rafId)
+  rafId = 0
 })
 </script>
 
