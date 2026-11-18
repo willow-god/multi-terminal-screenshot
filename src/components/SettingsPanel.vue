@@ -122,10 +122,6 @@ function onCustomColor(event: Event): void {
       </div>
 
       <template v-if="settings.provider === 'xxapi'">
-        <p class="group-hint">
-          小小API密钥
-          <a :href="API_KEY_URL" target="_blank" rel="noreferrer noopener">获取密钥 ↗</a>
-        </p>
         <label class="field key-field">
           <input
             v-model.trim="settings.apiKey"
@@ -139,6 +135,10 @@ function onCustomColor(event: Event): void {
             {{ keyVisible ? '隐藏' : '显示' }}
           </button>
         </label>
+        <p class="group-hint">
+          小小API密钥
+          <a :href="API_KEY_URL" target="_blank" rel="noreferrer noopener">获取密钥 ↗</a>
+        </p>
         <p v-if="keyTooLong" class="group-hint warn">
           这串密钥有 {{ settings.apiKey.trim().length }} 个字符，Access Key 最多 32 位，
           很可能复制成了别的字段。
