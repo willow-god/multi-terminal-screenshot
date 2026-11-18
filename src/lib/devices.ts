@@ -22,6 +22,8 @@ export interface DeviceSpec {
   frameSize: { w: number; h: number }
   /** 截图的绘制区域（比透明屏幕略外扩几像素，避免边缘漏底） */
   screen: Rect
+  /** 屏幕圆角（边框像素）；iframe 预览按它裁角，把四角藏进边框底下 */
+  screenRadius: number
   /** 抓图视口；mshots 上限为 1280×960，四个视口都按屏幕比例取值 */
   viewport: { w: number; h: number }
   /** 高清源（thum.io）请求的图片宽度 */
@@ -40,6 +42,7 @@ export const DEVICES: DeviceSpec[] = [
     frame: computerFrame,
     frameSize: { w: 1594, h: 1510 },
     screen: { x: 150, y: 150, w: 1294, h: 848 },
+    screenRadius: 10,
     viewport: { w: 1280, h: 840 },
     outputWidth: 1920,
     poster: { x: 506, y: 36, w: 1064, h: 1008, layer: 0 },
@@ -51,6 +54,7 @@ export const DEVICES: DeviceSpec[] = [
     frame: tabletFrame,
     frameSize: { w: 2354, h: 2978 },
     screen: { x: 278, y: 290, w: 1800, h: 2398 },
+    screenRadius: 30,
     viewport: { w: 720, h: 960 },
     outputWidth: 1440,
     poster: { x: 1337, y: 381, w: 490, h: 620, layer: 1 },
@@ -62,6 +66,7 @@ export const DEVICES: DeviceSpec[] = [
     frame: laptopFrame,
     frameSize: { w: 2170, h: 1390 },
     screen: { x: 318, y: 168, w: 1530, h: 962 },
+    screenRadius: 10,
     viewport: { w: 1280, h: 805 },
     outputWidth: 1920,
     poster: { x: 85, y: 462, w: 849, h: 544, layer: 2 },
@@ -73,6 +78,7 @@ export const DEVICES: DeviceSpec[] = [
     frame: phoneFrame,
     frameSize: { w: 2400, h: 4450 },
     screen: { x: 306, y: 292, w: 1788, h: 3866 },
+    screenRadius: 90,
     viewport: { w: 390, h: 844 },
     outputWidth: 780,
     poster: { x: 1218, y: 498, w: 260, h: 483, layer: 3 },

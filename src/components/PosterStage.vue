@@ -33,6 +33,8 @@ function screenStyle(spec: DeviceSpec) {
   const width = screen.w * s
   const height = screen.h * s
   const k = width / spec.viewport.w
+  /** 裁剪半径写在 iframe 自己的坐标系里，缩放后再乘 k 还原成舞台上的尺寸 */
+  const radius = (spec.screenRadius * s) / k
 
   return {
     left: `${screen.x * s}px`,
@@ -41,6 +43,8 @@ function screenStyle(spec: DeviceSpec) {
     /** 视口高度换算回缩放前的长度，保证正好铺满屏幕区域 */
     height: `${height / k}px`,
     transform: `scale(${k})`,
+    /** 四角按屏幕圆角裁掉，剩下的一点藏在设备边框底下，不会冒出来 */
+    clipPath: `inset(0 round ${radius}px)`,
   }
 }
 

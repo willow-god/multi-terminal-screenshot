@@ -60,6 +60,82 @@ function drawFitted(
 /** 设备图按 2 倍超采样，1× 预览走降采样、2× 导出正好 1:1 */
 const SUPERSAMPLE = 2
 
+const holeMaskCache = new Map<string, HTMLCanvasElement>()
+
+/**
+ * 屏幕洞口的遮罩：设备图中间那块「被边框包住的透明区域」。
+ * 边框整块不透明，只有屏幕洞和画面外是透明的，从图片四边做一次泛洪填充
+ * 就能把两者分开；截图按这块遮罩裁一遍，既不会溢出到设备外，
+ * 四周圆角也正好贴着屏幕自己的弧度走。
+ */
+function holeMask(src: string, frame: HTMLImageElement, frameW: number, frameH: number): HTMLCanvasElement {
+  const cached = holeMaskCache.get(src)
+  if (cached) return cached
+
+  // 半分辨率就够用：遮罩只决定边界，放大回画布时还有平滑
+  const mw = Math.max(1, Math.round(frameW / 2))
+  const mh = Math.max(1, Math.round(frameH / 2))
+  const small = document.createElement('canvas')
+  small.width = mw
+  small.height = mh
+
+  const sctx = small.getContext('2d', { willReadFrequently: true })
+  if (!sctx) {
+    holeMaskCache.set(src, small)
+    return small
+  }
+
+  sctx.drawImage(frame, 0, 0, mw, mh)
+  const image = sctx.getImageData(0, 0, mw, mh)
+  const px = image.data
+  const total = mw * mh
+  // 缩放时洞口边缘会被平均成半透明，阈值放宽一点让洞口略微吃进边框，免得留缝
+  const empty = (i: number): boolean => px[i * 4 + 3] < 128
+
+  const outside = new Uint8Array(total)
+  const stack = new Int32Array(total)
+  let top = 0
+  const seed = (i: number): void => {
+    if (outside[i] || !empty(i)) return
+    outside[i] = 1
+    stack[top] = i
+    top += 1
+  }
+
+  for (let x = 0; x < mw; x += 1) {
+    seed(x)
+    seed((mh - 1) * mw + x)
+  }
+  for (let y = 0; y < mh; y += 1) {
+    seed(y * mw)
+    seed(y * mw + mw - 1)
+  }
+
+  while (top > 0) {
+    top -= 1
+    const i = stack[top]
+    const x = i % mw
+    const y = (i - x) / mw
+    if (x > 0) seed(i - 1)
+    if (x < mw - 1) seed(i + 1)
+    if (y > 0) seed(i - mw)
+    if (y < mh - 1) seed(i + mw)
+  }
+
+  for (let i = 0; i < total; i += 1) {
+    const o = i * 4
+    const isHole = empty(i) && !outside[i]
+    px[o] = 255
+    px[o + 1] = 255
+    px[o + 2] = 255
+    px[o + 3] = isHole ? 255 : 0
+  }
+
+  sctx.putImageData(image, 0, 0)
+  holeMaskCache.set(src, small)
+  return small
+}
+
 function roundRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -171,6 +247,17 @@ function deviceCanvas(
   } else {
     drawPlaceholder(ctx, x, y, w, h)
   }
+
+  // 只留下屏幕洞口里的像素：整页截图再长也会在屏幕边缘被切掉，不会糊到设备外面
+  ctx.globalCompositeOperation = 'destination-in'
+  ctx.drawImage(
+    holeMask(spec.frame, frame, spec.frameSize.w, spec.frameSize.h),
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  )
+  ctx.globalCompositeOperation = 'source-over'
 
   // 边框画在最上层，截图从透明屏幕里透出来
   ctx.drawImage(frame, 0, 0, canvas.width, canvas.height)
