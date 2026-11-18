@@ -309,26 +309,48 @@ function urlFor(spec: DeviceSpec): string {
           </button>
         </div>
 
-        <button
-          v-if="settings.mode === 'api'"
-          class="btn hide-sm"
-          type="button"
-          :disabled="busy || !enabledCount"
-          @click="captureAll"
-        >
-          <Icon name="refresh" :size="15" />
-          {{ busy ? '抓取中…' : '抓取截图' }}
-        </button>
+        <template v-if="editingLayout">
+          <button
+            class="text-btn hide-sm"
+            type="button"
+            :disabled="!hasCustomLayout"
+            @click="resetLayout"
+          >
+            恢复默认
+          </button>
+          <button class="btn btn-primary hide-sm" type="button" @click="editingLayout = false">
+            <Icon name="check" :size="15" />
+            完成
+          </button>
+        </template>
 
-        <button
-          class="btn btn-primary hide-sm"
-          type="button"
-          :disabled="!canExport"
-          @click="exportPoster"
-        >
-          <Icon name="download" :size="15" />
-          导出海报
-        </button>
+        <template v-else>
+          <button class="btn hide-sm" type="button" @click="editingLayout = true">
+            <Icon name="move" :size="15" />
+            调整布局
+          </button>
+
+          <button
+            v-if="settings.mode === 'api'"
+            class="btn hide-sm"
+            type="button"
+            :disabled="busy || !enabledCount"
+            @click="captureAll"
+          >
+            <Icon name="refresh" :size="15" />
+            {{ busy ? '抓取中…' : '抓取截图' }}
+          </button>
+
+          <button
+            class="btn btn-primary hide-sm"
+            type="button"
+            :disabled="!canExport"
+            @click="exportPoster"
+          >
+            <Icon name="download" :size="15" />
+            导出海报
+          </button>
+        </template>
       </div>
     </header>
 
@@ -373,29 +395,21 @@ function urlFor(spec: DeviceSpec): string {
               </transition>
             </template>
           </PosterStage>
-
-          <div class="layout-bar" :class="{ editing: editingLayout }">
-            <template v-if="editingLayout">
-              <span class="layout-note">拖动设备摆位置，方向键可微调</span>
-              <button class="layout-btn" type="button" :disabled="!hasCustomLayout" @click="resetLayout">
-                恢复默认
-              </button>
-              <button class="layout-btn solid" type="button" @click="editingLayout = false">完成</button>
-            </template>
-            <button v-else class="layout-btn" type="button" @click="editingLayout = true">
-              <Icon name="move" :size="14" />
-              调整布局
-            </button>
-          </div>
         </div>
       </section>
     </main>
 
     <footer class="page-foot">
-      <span v-if="settings.mode === 'iframe'" class="mode-badge">
+      <span v-if="editingLayout" class="mode-badge editing">
+        <span class="dot" />布局编辑
+      </span>
+      <span v-if="editingLayout" class="foot-text">
+        拖动设备调整位置 · 方向键微调（Shift 走 10 像素）· Esc 退出
+      </span>
+      <span v-else-if="settings.mode === 'iframe'" class="mode-badge">
         <span class="dot" />实时预览
       </span>
-      <span class="foot-text">
+      <span v-if="!editingLayout" class="foot-text">
         <template v-if="settings.mode === 'api' && settings.provider === 'xxapi'">
           1920 × 1080 画布 · 截图由 XXAPI 实时渲染
         </template>
@@ -407,18 +421,34 @@ function urlFor(spec: DeviceSpec): string {
     </footer>
 
     <div class="dock">
-      <button class="dock-btn" type="button" :disabled="busy" @click="captureAll">
-        <Icon name="refresh" :size="18" />
-        <span>抓取</span>
-      </button>
-      <button class="dock-btn primary" type="button" :disabled="!canExport" @click="exportPoster">
-        <Icon name="download" :size="18" />
-        <span>导出</span>
-      </button>
-      <button class="dock-btn" type="button" @click="sheetOpen = true">
-        <Icon name="sliders" :size="18" />
-        <span>设置</span>
-      </button>
+      <template v-if="editingLayout">
+        <button class="dock-btn" type="button" :disabled="!hasCustomLayout" @click="resetLayout">
+          <Icon name="refresh" :size="18" />
+          <span>恢复默认</span>
+        </button>
+        <button class="dock-btn primary" type="button" @click="editingLayout = false">
+          <Icon name="check" :size="18" />
+          <span>完成</span>
+        </button>
+      </template>
+      <template v-else>
+        <button class="dock-btn" type="button" :disabled="busy" @click="captureAll">
+          <Icon name="refresh" :size="18" />
+          <span>抓取</span>
+        </button>
+        <button class="dock-btn primary" type="button" :disabled="!canExport" @click="exportPoster">
+          <Icon name="download" :size="18" />
+          <span>导出</span>
+        </button>
+        <button class="dock-btn" type="button" @click="editingLayout = true">
+          <Icon name="move" :size="18" />
+          <span>布局</span>
+        </button>
+        <button class="dock-btn" type="button" @click="sheetOpen = true">
+          <Icon name="sliders" :size="18" />
+          <span>设置</span>
+        </button>
+      </template>
     </div>
 
     <transition name="toast">
@@ -565,6 +595,16 @@ function urlFor(spec: DeviceSpec): string {
   background: var(--surface-2);
 }
 
+.text-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.text-btn:disabled:hover {
+  color: var(--muted);
+  background: none;
+}
+
 .icon-btn {
   display: grid;
   place-items: center;
@@ -605,67 +645,6 @@ function urlFor(spec: DeviceSpec): string {
   border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgba(26, 22, 16, 0.06), 0 26px 60px -34px rgba(26, 22, 16, 0.5);
   overflow: hidden;
-}
-
-.layout-bar {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 6;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.84);
-  border: 1px solid var(--line);
-  box-shadow: 0 12px 28px -18px rgba(26, 22, 16, 0.6);
-  backdrop-filter: blur(12px);
-}
-
-.layout-bar.editing {
-  border-color: var(--line-strong);
-}
-
-.layout-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--ink);
-  font-size: 12.5px;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background 0.16s ease, opacity 0.16s ease;
-}
-
-.layout-btn:hover:not(:disabled) {
-  background: var(--surface-2);
-}
-
-.layout-btn:disabled {
-  opacity: 0.38;
-  cursor: default;
-}
-
-.layout-btn.solid {
-  background: var(--ink);
-  color: #f7f6f3;
-}
-
-.layout-btn.solid:hover {
-  background: #2e2b26;
-}
-
-.layout-note {
-  padding: 0 10px 0 12px;
-  font-size: 12.5px;
-  color: var(--muted);
-  white-space: nowrap;
 }
 
 .stage-hint {
@@ -711,6 +690,15 @@ function urlFor(spec: DeviceSpec): string {
   height: 6px;
   border-radius: 50%;
   background: var(--green);
+}
+
+.mode-badge.editing {
+  border-color: #e09a33;
+  color: #a1651a;
+}
+
+.mode-badge.editing .dot {
+  background: #e09a33;
 }
 
 .foot-text {
@@ -926,13 +914,9 @@ function urlFor(spec: DeviceSpec): string {
     display: none;
   }
 
-  .layout-bar {
-    top: 8px;
-    left: 8px;
-  }
-
-  .layout-note {
-    display: none;
+  .dock-btn {
+    padding: 10px 11px;
+    font-size: 12.5px;
   }
 }
 </style>
