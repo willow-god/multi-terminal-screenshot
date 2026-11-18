@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import Icon from './components/Icon.vue'
 import PosterStage from './components/PosterStage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
@@ -30,7 +30,23 @@ const slots = reactive(
   ),
 )
 
-watch(settings, (value) => saveSettings(value), { deep: true })
+/** 拖动时位置每帧都在变，写 localStorage 做一点防抖，避免拖一次存几十遍 */
+let saveTimer = 0
+
+function flushSave(): void {
+  window.clearTimeout(saveTimer)
+  saveTimer = 0
+  saveSettings(settings)
+}
+
+watch(
+  settings,
+  (value) => {
+    window.clearTimeout(saveTimer)
+    saveTimer = window.setTimeout(() => saveSettings(value), 220)
+  },
+  { deep: true },
+)
 
 const sheetOpen = ref(false)
 const toastText = ref('')
@@ -46,15 +62,45 @@ function toast(message: string): void {
 
 onBeforeUnmount(() => {
   window.clearTimeout(toastTimer)
+  flushSave()
   cancelAll()
 })
+
+/** 布局编辑态：舞台上铺一层可拖动的热区 */
+const editingLayout = ref(false)
+const hasCustomLayout = computed(() => Object.keys(settings.layout).length > 0)
+
+function moveDevice(key: DeviceKey, x: number, y: number): void {
+  settings.layout[key] = { x, y }
+}
+
+function resetLayout(): void {
+  if (!hasCustomLayout.value) return
+  settings.layout = {}
+  toast('设备位置已恢复默认')
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && editingLayout.value) editingLayout.value = false
+}
+
+onMounted(() => window.addEventListener('keydown', onKeydown))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
 function targetFor(spec: DeviceSpec): string {
   const raw = settings.perDevice ? settings.urls[spec.key] || settings.url : settings.url
   return normalizeTarget(raw)
 }
 
-const enabledDevices = computed(() => DEVICES.filter((spec) => settings.enabled[spec.key]))
+/** 拖过位置的设备由 settings.layout 覆盖默认布局，其余设备沿用 devices.ts */
+const layoutSpecs = computed<DeviceSpec[]>(() =>
+  DEVICES.map((spec) => {
+    const pos = settings.layout[spec.key]
+    return pos ? { ...spec, poster: { ...spec.poster, x: pos.x, y: pos.y } } : spec
+  }),
+)
+
+const enabledDevices = computed(() => layoutSpecs.value.filter((spec) => settings.enabled[spec.key]))
 const enabledCount = computed(() => enabledDevices.value.length)
 const readyCount = computed(() => enabledDevices.value.filter((s) => slots[s.key].status === 'ready').length)
 const loadingCount = computed(() => enabledDevices.value.filter((s) => slots[s.key].status === 'loading').length)
@@ -318,13 +364,29 @@ function urlFor(spec: DeviceSpec): string {
             :url-for="urlFor"
             :background="settings.background"
             :fit="settings.fit"
+            :editing="editingLayout"
+            @move="moveDevice"
           >
             <template #overlay>
               <transition name="fade">
-                <p v-if="stageHint" class="stage-hint">{{ stageHint }}</p>
+                <p v-if="stageHint && !editingLayout" class="stage-hint">{{ stageHint }}</p>
               </transition>
             </template>
           </PosterStage>
+
+          <div class="layout-bar" :class="{ editing: editingLayout }">
+            <template v-if="editingLayout">
+              <span class="layout-note">拖动设备摆位置，方向键可微调</span>
+              <button class="layout-btn" type="button" :disabled="!hasCustomLayout" @click="resetLayout">
+                恢复默认
+              </button>
+              <button class="layout-btn solid" type="button" @click="editingLayout = false">完成</button>
+            </template>
+            <button v-else class="layout-btn" type="button" @click="editingLayout = true">
+              <Icon name="move" :size="14" />
+              调整布局
+            </button>
+          </div>
         </div>
       </section>
     </main>
@@ -535,6 +597,7 @@ function urlFor(spec: DeviceSpec): string {
 
 .stage-shell {
   flex: 1;
+  position: relative;
   width: 100%;
   min-width: 0;
   min-height: 0;
@@ -542,6 +605,67 @@ function urlFor(spec: DeviceSpec): string {
   border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgba(26, 22, 16, 0.06), 0 26px 60px -34px rgba(26, 22, 16, 0.5);
   overflow: hidden;
+}
+
+.layout-bar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 28px -18px rgba(26, 22, 16, 0.6);
+  backdrop-filter: blur(12px);
+}
+
+.layout-bar.editing {
+  border-color: var(--line-strong);
+}
+
+.layout-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--ink);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.16s ease, opacity 0.16s ease;
+}
+
+.layout-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.layout-btn:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.layout-btn.solid {
+  background: var(--ink);
+  color: #f7f6f3;
+}
+
+.layout-btn.solid:hover {
+  background: #2e2b26;
+}
+
+.layout-note {
+  padding: 0 10px 0 12px;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .stage-hint {
@@ -799,6 +923,15 @@ function urlFor(spec: DeviceSpec): string {
 
   .stage-hint {
     /* 小屏上画布几乎贴满卡片，气泡无处可放，交给底部 dock 的「抓取」按钮引导 */
+    display: none;
+  }
+
+  .layout-bar {
+    top: 8px;
+    left: 8px;
+  }
+
+  .layout-note {
     display: none;
   }
 }

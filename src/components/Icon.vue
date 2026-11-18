@@ -74,6 +74,10 @@ withDefaults(
       <rect x="3" y="4" width="12" height="16" rx="2" />
       <path d="M15 9h3.5a2.5 2.5 0 0 1 2.5 2.5V18a2 2 0 0 1-2 2H15" />
     </template>
+    <template v-else-if="name === 'move'">
+      <path d="M12 3.5v17M3.5 12h17" />
+      <path d="m9 6.5 3-3 3 3M9 17.5l3 3 3-3M6.5 9l-3 3 3 3M17.5 9l3 3-3 3" />
+    </template>
     <template v-else-if="name === 'sliders'">
       <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
       <circle cx="16" cy="7" r="2" />

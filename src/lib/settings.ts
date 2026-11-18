@@ -6,6 +6,12 @@ export type CaptureMode = 'api' | 'iframe'
 /** 截图服务：free = 免费公共服务（mshots/thum.io）；xxapi = 需要自备密钥的 XXAPI */
 export type CaptureProvider = 'free' | 'xxapi'
 
+/** 设备在海报画布里的位置（1920×1080 设计坐标） */
+export interface DevicePos {
+  x: number
+  y: number
+}
+
 export interface Settings {
   url: string
   perDevice: boolean
@@ -23,6 +29,8 @@ export interface Settings {
   apiKey: string
   /** 可选的反向代理前缀（如 https://proxy.example.com/），用来绕过对方的 CORS 限制；界面上不再暴露 */
   proxy: string
+  /** 手动拖动过的设备位置；没记录的设备沿用 devices.ts 里的默认布局 */
+  layout: Partial<Record<DeviceKey, DevicePos>>
 }
 
 export const BACKGROUNDS: { label: string; value: string | null }[] = [
@@ -49,6 +57,7 @@ export function defaultSettings(): Settings {
     provider: 'free',
     apiKey: '',
     proxy: '',
+    layout: {},
   }
 }
 
@@ -72,6 +81,7 @@ export function loadSettings(): Settings {
       provider: saved.provider === 'xxapi' ? 'xxapi' : 'free',
       apiKey: typeof saved.apiKey === 'string' ? saved.apiKey : '',
       proxy: typeof saved.proxy === 'string' ? saved.proxy : fallback.proxy,
+      layout: {},
     }
     if (saved.urls) {
       for (const key of KEYS) {
@@ -85,6 +95,15 @@ export function loadSettings(): Settings {
         if (typeof value === 'boolean') settings.enabled[key] = value
       }
       if (!KEYS.some((key) => settings.enabled[key])) settings.enabled = { ...fallback.enabled }
+    }
+    if (saved.layout) {
+      for (const key of KEYS) {
+        const pos = saved.layout[key] as Partial<DevicePos> | undefined
+        if (!pos) continue
+        if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+          settings.layout[key] = { x: Math.round(pos.x as number), y: Math.round(pos.y as number) }
+        }
+      }
     }
     return settings
   } catch {
