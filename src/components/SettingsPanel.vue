@@ -23,7 +23,7 @@ const keyVisible = ref(false)
 /** 小小API（xxapi.cn）的密钥页 */
 const API_KEY_URL = 'https://xxapi.cn/admin/api-keys'
 /** 代理部署说明（gist） */
-const PROXY_GUIDE_URL = 'https://gist.github.com/'
+const PROXY_GUIDE_URL = 'https://gist.liushen.fun/LiuShen/cf-nginx'
 /** XXAPI 的密钥（含 uak_ 前缀）最多 32 位，超了服务端会直接判为「参数不合法」 */
 const keyTooLong = computed(() => props.settings.apiKey.trim().length > 32)
 
@@ -269,7 +269,7 @@ function onCustomColor(event: Event): void {
 .panel-body {
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 30px;
   flex: 1;
   min-height: 0;
   padding: 18px 20px 22px;
@@ -297,7 +297,7 @@ function onCustomColor(event: Event): void {
 .group {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .group-title {
