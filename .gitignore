@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 超分源图（体积大，仅本地保留，不入库也不删除）
+src/assets/images/new-model/*_upscayl_*.png
