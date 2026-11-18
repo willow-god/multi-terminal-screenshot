@@ -1,462 +1,622 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
-import html2canvas from 'html2canvas';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import Icon from './components/Icon.vue'
+import PosterStage from './components/PosterStage.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
+import { DEVICES, type DeviceKey, type DeviceSpec } from './lib/devices'
+import { blobToImage, captureScreenshot, hostOf, normalizeTarget } from './lib/screenshot'
+import { downloadCanvas, renderPoster, type Shot } from './lib/poster'
+import { defaultSettings, loadSettings, saveSettings, type Settings } from './lib/settings'
 
-//——————————————————————————————————————————————————————————————————————————————————————
-const resetPreview = () => {
-  activeDevice.value = ''
-  coverShow.value = false
-}
-document.body.addEventListener('click', () => void resetPreview())
+type Status = 'idle' | 'loading' | 'ready' | 'error'
 
-// 设备单独处理
-enum Device {
-  phone = 'phone',
-  pad = 'pad',
-  computer = 'computer',
-  laptop = 'laptop' // 新增笔记本设备
-}
-
-
-const activeDevice = {
-
-} = ref<Device | ''>('')
-
-const handleActiveDevice = (device: Device) => {
-  activeDevice.value = device;
-  coverShow.value = true;
+interface Slot {
+  status: Status
+  image: Shot | null
+  error: string
+  /** 这张截图对应哪个网址，用于提示网址变更后的过期状态 */
+  target: string
 }
 
-//——————————————————————————————————————————————————————————————————————————————————————
+const settings = reactive<Settings>(loadSettings())
 
-// 网址处理
-const protocol = ref('https');     // 默认协议为 https
-const url = ref('www.liushen.fun')
-const phone = ref('')
-const pad = ref('')
-const computer = ref('')
-const laptop = ref('')
-const customURL = ref(false)
+const slots = reactive(
+  DEVICES.reduce(
+    (acc, spec) => {
+      acc[spec.key] = { status: 'idle', image: null, error: '', target: '' } as Slot
+      return acc
+    },
+    {} as Record<DeviceKey, Slot>,
+  ),
+)
 
-watch([phone, pad, computer], () => {
-  url.value = ''
+watch(settings, (value) => saveSettings(value), { deep: true })
+
+const sheetOpen = ref(false)
+const toastText = ref('')
+let toastTimer = 0
+
+function toast(message: string): void {
+  toastText.value = message
+  window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => {
+    toastText.value = ''
+  }, 2600)
+}
+
+onBeforeUnmount(() => {
+  window.clearTimeout(toastTimer)
+  cancelAll()
 })
 
-watch(url, (n) => {
-  url.value = n.replace(/http(s?)\:\/\//, '')
+function targetFor(spec: DeviceSpec): string {
+  const raw = settings.perDevice ? settings.urls[spec.key] || settings.url : settings.url
+  return normalizeTarget(raw)
+}
+
+const enabledDevices = computed(() => DEVICES.filter((spec) => settings.enabled[spec.key]))
+const enabledCount = computed(() => enabledDevices.value.length)
+const readyCount = computed(() => enabledDevices.value.filter((s) => slots[s.key].status === 'ready').length)
+const loadingCount = computed(() => enabledDevices.value.filter((s) => slots[s.key].status === 'loading').length)
+const busy = computed(() => loadingCount.value > 0)
+const doneCount = computed(
+  () =>
+    enabledDevices.value.filter((s) => ['ready', 'error'].includes(slots[s.key].status)).length,
+)
+const staleCount = computed(
+  () =>
+    enabledDevices.value.filter(
+      (spec) => slots[spec.key].image && slots[spec.key].target !== targetFor(spec),
+    ).length,
+)
+
+const canExport = computed(
+  () => settings.mode === 'api' && readyCount.value > 0 && !busy.value,
+)
+
+const shotMap = computed<Record<string, Shot | null>>(() => {
+  const map: Record<string, Shot | null> = {}
+  for (const spec of DEVICES) map[spec.key] = slots[spec.key].image
+  return map
 })
 
-// 滚动条处理
-const scrollBar = ref(false)
-
-const coverShow = ref(false)
-
-// 协议切换
-const toggleProtocol = () => {
-  protocol.value = protocol.value === 'https' ? 'http' : 'https'
-}
-
-// 定位框功能
-const positionBoxVisible = ref(false)
-const positionBox = ref({
-  x: 100,
-  y: 100,
-  width: 400,
-  height: 300
+const stageHint = computed(() => {
+  if (settings.mode === 'iframe') {
+    return enabledDevices.value.some((spec) => targetFor(spec)) ? '' : '填写网址后这里会实时加载页面'
+  }
+  if (busy.value) return `正在生成截图 · ${doneCount.value} / ${enabledCount.value}`
+  if (!enabledCount.value) return '在设置里开启至少一台设备'
+  if (!readyCount.value) return '填好网址，点「抓取截图」'
+  if (staleCount.value) return `有 ${staleCount.value} 台设备的截图来自旧网址`
+  return ''
 })
-const isDragging = ref(false)
-const isResizing = ref(false)
-const resizeCorner = ref('')
-const dragStart = ref({ x: 0, y: 0, boxX: 0, boxY: 0, initialX: 0, initialY: 0 })
-const positionCode = ref('')
-const showPositionMenu = ref(false)
-const showUrlMenu = ref(false)
-const isMenuVisible = ref(true) // 控制菜单显示/隐藏
-const isMobileMenuOpen = ref(false) // 移动端菜单开关
 
-// 从 localStorage 恢复定位框
-const loadPositionFromStorage = () => {
-  const saved = localStorage.getItem('positionBox')
-  if (saved) {
-    try {
-      positionBox.value = JSON.parse(saved)
-    } catch (e) {
-      console.error('恢复定位框失败:', e)
+function cancelAll(): void {
+  for (const controller of controllers) controller.abort()
+  controllers.clear()
+}
+
+const controllers = new Set<AbortController>()
+
+async function captureOne(spec: DeviceSpec): Promise<void> {
+  const slot = slots[spec.key]
+  const target = targetFor(spec)
+  if (!target) {
+    slot.status = 'error'
+    slot.error = '还没有填写这个设备的网址'
+    return
+  }
+
+  const controller = new AbortController()
+  controllers.add(controller)
+  slot.status = 'loading'
+  slot.error = ''
+
+  try {
+    const blob = await captureScreenshot(spec, target, controller.signal, {
+      provider: settings.provider,
+      apiKey: settings.apiKey,
+      proxy: settings.proxy,
+    })
+    const image = await blobToImage(blob)
+    if (controller.signal.aborted) return
+    slot.image = image
+    slot.target = target
+    slot.status = 'ready'
+  } catch (error) {
+    if (controller.signal.aborted) return
+    slot.status = 'error'
+    slot.error = (error as Error).message || '截图失败'
+  } finally {
+    controllers.delete(controller)
+  }
+}
+
+async function captureAll(): Promise<void> {
+  if (settings.mode === 'iframe') {
+    toast('iframe 预览模式不需要抓取')
+    return
+  }
+
+  const queue = enabledDevices.value.filter((spec) => targetFor(spec))
+  if (!queue.length) {
+    toast('请先填写要截图的网址')
+    return
+  }
+
+  const skipped = enabledCount.value - queue.length
+  if (skipped > 0) toast(`已跳过 ${skipped} 台未填写网址的设备`)
+
+  cancelAll()
+
+  let cursor = 0
+  // XXAPI 对并发比较敏感（会回「请求过于频繁」），同时只跑两台并错开一点起跑
+  const xxapi = settings.provider === 'xxapi'
+  const parallel = Math.min(xxapi ? 2 : 3, queue.length)
+  const stagger = xxapi ? 600 : 0
+  const workers = Array.from({ length: parallel }, async (_, index) => {
+    if (stagger) await new Promise((resolve) => setTimeout(resolve, index * stagger))
+    while (cursor < queue.length) {
+      const spec = queue[cursor]
+      cursor += 1
+      await captureOne(spec)
     }
+  })
+
+  await Promise.all(workers)
+
+  const ok = queue.filter((spec) => slots[spec.key].status === 'ready').length
+  toast(ok === queue.length ? '四台设备截图已就绪' : `${ok} / ${queue.length} 台设备抓取成功`)
+}
+
+function onUpload(key: DeviceKey, file: File): void {
+  const url = URL.createObjectURL(file)
+  const image = new Image()
+  image.onload = () => {
+    slots[key].image = image
+    slots[key].target = targetFor(DEVICES.find((spec) => spec.key === key) as DeviceSpec)
+    slots[key].status = 'ready'
+    slots[key].error = ''
+  }
+  image.onerror = () => {
+    URL.revokeObjectURL(url)
+    toast('这张图片读不出来')
+  }
+  image.src = url
+}
+
+function stamp(): string {
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+}
+
+async function exportPoster(): Promise<void> {
+  if (!canExport.value) {
+    if (settings.mode === 'iframe') toast('iframe 预览不支持导出，切到「接口截图」再导出')
+    return
+  }
+
+  const specs = enabledDevices.value.filter((spec) => slots[spec.key].image)
+  if (!specs.length) return
+
+  const canvas = document.createElement('canvas')
+  try {
+    await renderPoster(canvas, specs, shotMap.value, {
+      scale: settings.scale,
+      fit: settings.fit,
+      background: settings.background,
+    })
+    const host = hostOf(targetFor(specs[0])).replace(/^www\./, '').split(':')[0] || 'poster'
+    await downloadCanvas(canvas, `${host}-${stamp()}.png`)
+    toast(`已导出 ${settings.scale}× 海报`)
+  } catch (error) {
+    toast((error as Error).message || '导出失败')
   }
 }
 
-// 保存定位框到 localStorage
-const savePositionToStorage = () => {
-  localStorage.setItem('positionBox', JSON.stringify(positionBox.value))
-}
-
-// 初始化时加载
-loadPositionFromStorage()
-
-// 监听定位框变化，自动保存
-watch(positionBox, () => {
-  savePositionToStorage()
-}, { deep: true })
-
-// 定位框功能
-const togglePositionBox = () => {
-  positionBoxVisible.value = !positionBoxVisible.value
-}
-
-const startDrag = (e: MouseEvent) => {
-  isDragging.value = true
-  dragStart.value = {
-    x: e.clientX,
-    y: e.clientY,
-    boxX: positionBox.value.x,
-    boxY: positionBox.value.y,
-    initialX: 0,
-    initialY: 0
+function resetAll(): void {
+  Object.assign(settings, defaultSettings())
+  for (const spec of DEVICES) {
+    slots[spec.key].image = null
+    slots[spec.key].status = 'idle'
+    slots[spec.key].error = ''
+    slots[spec.key].target = ''
   }
+  cancelAll()
+  toast('已恢复默认设置')
 }
 
-const onDrag = (e: MouseEvent) => {
-  if (isDragging.value) {
-    positionBox.value.x = dragStart.value.boxX + (e.clientX - dragStart.value.x)
-    positionBox.value.y = dragStart.value.boxY + (e.clientY - dragStart.value.y)
-  } else if (isResizing.value) {
-    const dx = e.clientX - dragStart.value.x
-    const dy = e.clientY - dragStart.value.y
-
-    if (resizeCorner.value.includes('right')) {
-      positionBox.value.width = Math.max(50, dragStart.value.boxX + dx)
-    }
-    if (resizeCorner.value.includes('left')) {
-      const newWidth = Math.max(50, dragStart.value.boxX - dx)
-      positionBox.value.x = dragStart.value.initialX + (dragStart.value.boxX - newWidth)
-      positionBox.value.width = newWidth
-    }
-    if (resizeCorner.value.includes('bottom')) {
-      positionBox.value.height = Math.max(50, dragStart.value.boxY + dy)
-    }
-    if (resizeCorner.value.includes('top')) {
-      const newHeight = Math.max(50, dragStart.value.boxY - dy)
-      positionBox.value.y = dragStart.value.initialY + (dragStart.value.boxY - newHeight)
-      positionBox.value.height = newHeight
-    }
-  }
+function urlFor(spec: DeviceSpec): string {
+  return targetFor(spec)
 }
-
-const endDrag = () => {
-  isDragging.value = false
-  isResizing.value = false
-  resizeCorner.value = ''
-}
-
-const startResize = (corner: string, e: MouseEvent) => {
-  e.stopPropagation()
-  isResizing.value = true
-  resizeCorner.value = corner
-  
-  // 保存初始位置用于调整
-  const initialX = corner.includes('left') ? positionBox.value.x : 0
-  const initialY = corner.includes('top') ? positionBox.value.y : 0
-  
-  dragStart.value = {
-    x: e.clientX,
-    y: e.clientY,
-    boxX: positionBox.value.width,
-    boxY: positionBox.value.height,
-    initialX: initialX,
-    initialY: initialY
-  }
-}
-
-const exportPositionCode = () => {
-  const screenInfo = {
-    width: window.screen.width,
-    height: window.screen.height,
-    devicePixelRatio: window.devicePixelRatio
-  }
-  const data = {
-    box: positionBox.value,
-    screen: screenInfo
-  }
-  const code = btoa(JSON.stringify(data))
-  positionCode.value = code
-  navigator.clipboard.writeText(code)
-  alert(`定位框代码已复制到剪贴板！\n\n当前分辨率：${screenInfo.width}x${screenInfo.height}\n缩放比例：${screenInfo.devicePixelRatio}\n\n提示：在相同分辨率和缩放比例下使用此代码，可获得最佳还原效果。`)
-}
-
-const importPositionCode = () => {
-  const code = prompt('请输入定位框代码：')
-  if (code) {
-    try {
-      const data = JSON.parse(atob(code))
-      const currentScreen = {
-        width: window.screen.width,
-        height: window.screen.height,
-        devicePixelRatio: window.devicePixelRatio
-      }
-      
-      if (data.screen) {
-        const isSameResolution = data.screen.width === currentScreen.width && 
-                                 data.screen.height === currentScreen.height &&
-                                 data.screen.devicePixelRatio === currentScreen.devicePixelRatio
-        
-        if (!isSameResolution) {
-          const proceed = confirm(
-            `警告：分辨率不匹配！\n\n` +
-            `代码分辨率：${data.screen.width}x${data.screen.height} (缩放${data.screen.devicePixelRatio})\n` +
-            `当前分辨率：${currentScreen.width}x${currentScreen.height} (缩放${currentScreen.devicePixelRatio})\n\n` +
-            `定位框位置可能不准确，是否继续导入？`
-          )
-          if (!proceed) return
-        }
-      }
-      
-      positionBox.value = data.box || data
-      positionBoxVisible.value = true
-      alert('定位框已恢复！')
-    } catch (e) {
-      alert('代码格式错误！')
-    }
-  }
-}
-
 </script>
 
 <template>
-  <section class="main" @mousemove="onDrag" @mouseup="endDrag">
-    <!-- 定位框 -->
-    <div v-if="positionBoxVisible" class="position-box" :style="{
-      left: positionBox.x + 'px',
-      top: positionBox.y + 'px',
-      width: positionBox.width + 'px',
-      height: positionBox.height + 'px'
-    }" @mousedown.stop="startDrag">
-      <div class="corner top-left" @mousedown.stop="startResize('top-left', $event)"></div>
-      <div class="corner top-right" @mousedown.stop="startResize('top-right', $event)"></div>
-      <div class="corner bottom-left" @mousedown.stop="startResize('bottom-left', $event)"></div>
-      <div class="corner bottom-right" @mousedown.stop="startResize('bottom-right', $event)"></div>
-      <div class="position-label">定位框 {{ positionBox.width }}x{{ positionBox.height }}</div>
-    </div>
-
-    <!-- 预览覆盖背景 -->
-    <transition name="fade">
-      <div v-if="coverShow" class="cover">
-        <div class="close-preview" @click="resetPreview"><i class="iconfont icon-cancel-1-copy"></i></div>
-      </div>
-    </transition>
-    <div class="preview-box">
-      <div class="computer" :class="{ active: activeDevice === Device.computer, activated: activeDevice }"
-        @click.stop="handleActiveDevice(Device.computer)">
-        <iframe :src="`${protocol}://${url || computer}`" frameborder="0" :scrolling="scrollBar ? 'yes' : 'no'"></iframe>
-      </div>
-      <div class="laptop" :class="{ active: activeDevice === Device.laptop, activated: activeDevice }"
-        @click.stop="handleActiveDevice(Device.laptop)">
-        <iframe :src="`${protocol}://${url || laptop}`" frameborder="0" :scrolling="scrollBar ? 'yes' : 'no'"></iframe>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">
+          <Icon name="frame" :size="17" />
+        </span>
+        <span class="brand-text">
+          <strong>端影</strong>
+          <small>一个网址，四块屏幕，一张海报</small>
+        </span>
       </div>
 
-      <div class="phone" :class="{ active: activeDevice === Device.phone, activated: activeDevice }"
-        @click.stop="handleActiveDevice(Device.phone)">
-        <iframe :src="`${protocol}://${url || phone}`" frameborder="0" :scrolling="scrollBar ? 'yes' : 'no'"></iframe>
+      <div class="topbar-tools">
+        <div class="segmented mode">
+          <button
+            type="button"
+            :class="{ active: settings.mode === 'api' }"
+            @click="settings.mode = 'api'"
+          >
+            接口截图
+          </button>
+          <button
+            type="button"
+            :class="{ active: settings.mode === 'iframe' }"
+            @click="settings.mode = 'iframe'"
+          >
+            iframe 预览
+          </button>
+        </div>
+
+        <button
+          v-if="settings.mode === 'api'"
+          class="btn hide-sm"
+          type="button"
+          :disabled="busy || !enabledCount"
+          @click="captureAll"
+        >
+          <Icon name="refresh" :size="15" />
+          {{ busy ? '抓取中…' : '抓取截图' }}
+        </button>
+
+        <button
+          class="btn btn-primary hide-sm"
+          type="button"
+          :disabled="!canExport"
+          @click="exportPoster"
+        >
+          <Icon name="download" :size="15" />
+          导出海报
+        </button>
       </div>
-      <div class="pad" :class="{ active: activeDevice === Device.pad, activated: activeDevice }"
-        @click.stop="handleActiveDevice(Device.pad)">
-        <iframe :src="`${protocol}://${url || pad}`" frameborder="0" :scrolling="scrollBar ? 'yes' : 'no'"></iframe>
-      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar" :class="{ open: sheetOpen }">
+        <span class="sheet-handle" />
+        <div class="sidebar-head">
+          <h2>设置</h2>
+          <div class="sidebar-head-actions">
+            <button class="text-btn" type="button" @click="resetAll">恢复默认</button>
+            <button class="icon-btn only-sm" type="button" title="关闭" @click="sheetOpen = false">
+              <Icon name="close" :size="16" />
+            </button>
+          </div>
+        </div>
+        <SettingsPanel
+          :settings="settings"
+          :slots="slots"
+          :busy="busy"
+          :mode="settings.mode"
+          @upload="onUpload"
+        />
+      </aside>
+
+      <div v-if="sheetOpen" class="scrim" @click="sheetOpen = false" />
+
+      <section class="view">
+        <div class="stage-shell">
+          <PosterStage
+            :mode="settings.mode"
+            :specs="enabledDevices"
+            :shots="shotMap"
+            :url-for="urlFor"
+            :background="settings.background"
+            :fit="settings.fit"
+          >
+            <template #overlay>
+              <transition name="fade">
+                <p v-if="stageHint" class="stage-hint">{{ stageHint }}</p>
+              </transition>
+            </template>
+          </PosterStage>
+        </div>
+      </section>
+    </main>
+
+    <footer class="page-foot">
+      <span v-if="settings.mode === 'iframe'" class="mode-badge">
+        <span class="dot" />实时预览
+      </span>
+      <span class="foot-text">
+        <template v-if="settings.mode === 'api' && settings.provider === 'xxapi'">
+          1920 × 1080 画布 · 截图由 XXAPI 实时渲染
+        </template>
+        <template v-else-if="settings.mode === 'api'">
+          1920 × 1080 画布 · 截图由 WordPress mshots 渲染，首次约几秒、缓存 12 小时
+        </template>
+        <template v-else>实时加载目标站点，受 X-Frame-Options / CSP 限制时可能空白，不支持导出</template>
+      </span>
+    </footer>
+
+    <div class="dock">
+      <button class="dock-btn" type="button" :disabled="busy" @click="captureAll">
+        <Icon name="refresh" :size="18" />
+        <span>抓取</span>
+      </button>
+      <button class="dock-btn primary" type="button" :disabled="!canExport" @click="exportPoster">
+        <Icon name="download" :size="18" />
+        <span>导出</span>
+      </button>
+      <button class="dock-btn" type="button" @click="sheetOpen = true">
+        <Icon name="sliders" :size="18" />
+        <span>设置</span>
+      </button>
     </div>
-    <!-- -------------------------------------------------------------- -->
-    <!-- 移动端菜单按钮 -->
-    <div class="mobile-menu-button" @click="isMobileMenuOpen = !isMobileMenuOpen" v-if="!activeDevice">
-      <i class="iconfont" :class="isMobileMenuOpen ? 'icon-cancel-1-copy' : 'icon-icon_wangye'"></i>
-    </div>
-    
-    <!-- 移动端全屏菜单遮罩 -->
-    <transition name="fade">
-      <div class="mobile-menu-overlay" v-if="isMobileMenuOpen" @click="isMobileMenuOpen = false"></div>
+
+    <transition name="toast">
+      <div v-if="toastText && !sheetOpen" class="toast">{{ toastText }}</div>
     </transition>
-    
-    <!-- 移动端全屏菜单 -->
-    <transition name="slide-up">
-      <div class="mobile-menu-panel" v-if="isMobileMenuOpen" @click.stop>
-        <div class="mobile-menu-content">
-          <!-- 网址 -->
-          <div class="url">
-            <div class="default">
-              <span @click.stop="customURL = !customURL" class="website" :class="{ active: customURL }">
-                <i class="iconfont icon-icon_wangye"></i> 网址</span>
-              <span style="font-size: 14px; opacity: 0.7; margin-left: 8px;">{{protocol}}://</span>
-              <input type="text" placeholder="请输入网址" v-model.trim="url" class="url" style="flex: 1; min-width: 0;">
-            </div>
-            <transition name="fade">
-              <div class="custom" v-if="customURL">
-                <div class="custom-inner">
-                  <div class="custom-row">
-                    <span class="row-label"><i class="iconfont icon-wangye"></i> 笔记本</span>
-                    <span class="row-protocol">{{ protocol }}://</span>
-                    <input type="text" placeholder="请输入网址" v-model.trim="laptop">
-                  </div>
-                  <div class="custom-row">
-                    <span class="row-label"><i class="iconfont icon-shumashouji"></i> 手机</span>
-                    <span class="row-protocol">{{ protocol }}://</span>
-                    <input type="text" placeholder="请输入网址" v-model.trim="phone">
-                  </div>
-                  <div class="custom-row">
-                    <span class="row-label"><i class="iconfont icon-pingban"></i> 平板</span>
-                    <span class="row-protocol">{{ protocol }}://</span>
-                    <input type="text" placeholder="请输入网址" v-model.trim="pad">
-                  </div>
-                  <div class="custom-row">
-                    <span class="row-label"><i class="iconfont icon-diannao"></i> 电脑</span>
-                    <span class="row-protocol">{{ protocol }}://</span>
-                    <input type="text" placeholder="请输入网址" v-model.trim="computer">
-                  </div>
-                </div>
-                <div class="close" @click="customURL = false"><i class="iconfont icon-cancel-1-copy"></i></div>
-              </div>
-            </transition>
-          </div>
-          <!-- 滚动条 -->
-          <div class="control-item scroll-bar">
-            <label>
-              <div class="checkbox">
-                <i class="iconfont" :class="scrollBar ? 'icon-yigouxuan' : 'icon-weigouxuan'"></i>
-              </div>
-              <span class="text">滚动条</span>
-              <input type="checkbox" v-model="scrollBar" v-show="false" />
-            </label>
-          </div>
-          <!-- 协议切换按钮 -->
-          <div class="control-item protocol-toggle" @click="toggleProtocol">
-            <div class="protocol-switch">
-              <div class="protocol-indicator" :class="{ 'is-http': protocol === 'http' }"></div>
-              <span class="protocol-text">{{ protocol.toUpperCase() }}</span>
-            </div>
-          </div>
-          <!-- 定位框菜单 -->
-          <div class="control-item position-menu" @click="showPositionMenu = !showPositionMenu">
-            <div class="menu-trigger">
-              <i class="iconfont icon-icon_wangye"></i>
-              <span>定位框</span>
-            </div>
-            <transition name="slide-fade">
-              <div v-if="showPositionMenu" class="menu-dropdown">
-                <div class="menu-item" @click="togglePositionBox">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>{{ positionBoxVisible ? '隐藏' : '显示' }}</span>
-                </div>
-                <div class="menu-item" @click="exportPositionCode">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>导出</span>
-                </div>
-                <div class="menu-item" @click="importPositionCode">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>导入</span>
-                </div>
-              </div>
-            </transition>
-          </div>
-        </div>
-      </div>
-    </transition>
-    
-    <!-- 桌面端菜单 -->
-    <transition name="fade">
-      <div class="controls" v-if="!activeDevice">
-        <!-- 网址 -->
-        <div class="url url-menu-wrapper" @mouseenter="showUrlMenu = true" @mouseleave="showUrlMenu = false">
-          <div class="default">
-            <span class="website" :class="{ active: showUrlMenu }">
-              <i class="iconfont icon-icon_wangye"></i> 网址</span>
-            <transition name="fade">
-              <div class="url-input-wrap">
-                <span class="url-protocol">{{protocol}}://</span>
-                <input type="text" placeholder="请输入网址" v-model.trim="url" class="url-main-input">
-              </div>
-            </transition>
-          </div>
-          <transition name="slide-fade">
-            <div class="custom" v-if="showUrlMenu" @click.stop>
-              <div class="custom-inner">
-                <div class="custom-row">
-                  <span class="row-label"><i class="iconfont icon-wangye"></i> 笔记本</span>
-                  <span class="row-protocol">{{ protocol }}://</span>
-                  <input type="text" placeholder="请输入网址" v-model.trim="laptop" class="url">
-                </div>
-                <div class="custom-row">
-                  <span class="row-label"><i class="iconfont icon-shumashouji"></i> 手机</span>
-                  <span class="row-protocol">{{ protocol }}://</span>
-                  <input type="text" placeholder="请输入网址" v-model.trim="phone" class="url">
-                </div>
-                <div class="custom-row">
-                  <span class="row-label"><i class="iconfont icon-pingban"></i> 平板</span>
-                  <span class="row-protocol">{{ protocol }}://</span>
-                  <input type="text" placeholder="请输入网址" v-model.trim="pad" class="url">
-                </div>
-                <div class="custom-row">
-                  <span class="row-label"><i class="iconfont icon-diannao"></i> 电脑</span>
-                  <span class="row-protocol">{{ protocol }}://</span>
-                  <input type="text" placeholder="请输入网址" v-model.trim="computer" class="url">
-                </div>
-              </div>
-            </div>
-          </transition>
-        </div>
-        <!-- 滚动条 -->
-        <div class="control-item scroll-bar">
-          <label>
-            <div class="checkbox">
-              <i class="iconfont" :class="scrollBar ? 'icon-yigouxuan' : 'icon-weigouxuan'"></i>
-            </div>
-            <span class="text">滚动条</span>
-            <input type="checkbox" v-model="scrollBar" v-show="false" />
-          </label>
-        </div>
-        <!-- 协议切换按钮 -->
-        <div class="control-item protocol-toggle" @click="toggleProtocol">
-          <div class="protocol-switch">
-            <div class="protocol-indicator" :class="{ 'is-http': protocol === 'http' }"></div>
-            <span class="protocol-text">{{ protocol.toUpperCase() }}</span>
-          </div>
-        </div>
-        <!-- 定位框菜单 -->
-        <div class="control-item position-menu" @mouseenter="showPositionMenu = true" @mouseleave="showPositionMenu = false">
-          <div class="menu-trigger">
-            <i class="iconfont icon-icon_wangye"></i>
-            <span>定位框</span>
-          </div>
-          <transition name="slide-fade">
-            <div v-if="showPositionMenu" class="menu-dropdown">
-              <div class="menu-dropdown-inner">
-                <div class="menu-item" @click="togglePositionBox">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>{{ positionBoxVisible ? '隐藏' : '显示' }}</span>
-                </div>
-                <div class="menu-item" @click="exportPositionCode">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>导出</span>
-                </div>
-                <div class="menu-item" @click="importPositionCode">
-                  <i class="iconfont icon-icon_wangye"></i>
-                  <span>导入</span>
-                </div>
-              </div>
-            </div>
-          </transition>
-        </div>
-      </div>
-    </transition>
-  </section>
+  </div>
 </template>
 
-<style lang="less">
-* {
-  margin: 0;
+<style scoped>
+.app {
+  /* 页面高度锁死在一屏内：右侧画布按剩余空间定高，左侧设置栏超了自己滚，
+     不会被设置项变多拽着一起变高 */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 64px;
+  padding: 0 24px;
+  background: rgba(244, 243, 240, 0.82);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--ink);
+  color: #f7f6f3;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.brand-text strong {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.brand-text small {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.segmented.mode button {
+  padding: 0 12px;
+  height: 30px;
+}
+
+.workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 304px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 20px;
+  align-items: stretch;
+  width: 100%;
+  max-width: 1720px;
+  margin: 0 auto;
+  padding: 20px 22px 0;
+  min-height: 0;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
   padding: 0;
-  -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+  border-radius: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+  height: 100%;
+  min-height: 0;
+  /* 卡片自己不留滚动：滚动交给内部的 .panel-body，滚动条就不会戳出圆角 */
+  overflow: hidden;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sidebar-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sidebar-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.text-btn {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease;
+}
+
+.text-btn:hover {
+  color: var(--ink);
+  background: var(--surface-2);
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.only-sm {
+  display: none;
+}
+
+.sheet-handle {
+  display: none;
+}
+
+.scrim {
+  display: none;
+}
+
+.view {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.stage-shell {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  box-shadow: 0 1px 2px rgba(26, 22, 16, 0.06), 0 26px 60px -34px rgba(26, 22, 16, 0.5);
+  overflow: hidden;
+}
+
+.stage-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: rgba(25, 24, 22, 0.72);
+  color: #f7f6f3;
+  font-size: 12.5px;
+  white-space: nowrap;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+.page-foot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 24px 16px;
+  min-height: 44px;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 11.5px;
+}
+
+.mode-badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.foot-text {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.dock {
+  display: none;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 62px;
+  transform: translateX(-50%);
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: rgba(25, 24, 22, 0.92);
+  color: #f7f6f3;
+  font-size: 13px;
+  z-index: 80;
+  box-shadow: 0 18px 40px -20px rgba(0, 0, 0, 0.6);
 }
 
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.5s ease;
+  transition: opacity 0.2s ease;
 }
 
 .fade-enter-from,
@@ -464,1065 +624,182 @@ const importPositionCode = () => {
   opacity: 0;
 }
 
-.slide-fade-enter-active {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+.toast-enter-active,
+.toast-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.slide-fade-leave-active {
-  transition: all 0.2s cubic-bezier(0.4, 0, 1, 1);
-}
-
-.slide-fade-enter-from {
+.toast-enter-from,
+.toast-leave-to {
   opacity: 0;
-  transform: translateY(-10px);
+  transform: translate(-50%, 8px);
 }
 
-.slide-fade-leave-to {
-  opacity: 0;
-  transform: translateY(-5px);
-}
-
-.slide-down-enter-active,
-.slide-down-leave-active {
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.slide-down-enter-from,
-.slide-down-leave-to {
-  opacity: 0;
-  transform: translate(-50%, -100%);
-}
-
-.slide-up-enter-active,
-.slide-up-leave-active {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.slide-up-enter-from {
-  transform: translateY(100%);
-}
-
-.slide-up-leave-to {
-  transform: translateY(100%);
-}
-
-body {
-  color: #333;
-  font-family: Avenir, Helvetica, Arial, sans-serif;
-  user-select: none;
-  height: 100vh;
-  background-color: white;
-}
-
-.main {
-  margin: 0 auto;
-
-  .cover {
-    top: 0;
-    position: fixed;
-    width: 100%;
-    height: 100%;
-    background-color: rgba(255, 255, 255, 1);
-    z-index: 100;
-
-    .close-preview {
-      position: fixed;
-      width: fit-content;
-      top: 40px;
-      right: 40px;
-      cursor: pointer;
-
-      .iconfont {
-        font-size: 26px;
-      }
-    }
+@media (max-width: 1279px) {
+  .workspace {
+    grid-template-columns: 288px minmax(0, 1fr);
+    gap: 18px;
+    padding: 18px 18px 0;
   }
+}
 
-  .preview-box {
-    position: relative;
-    top: 200px;
-    width: 1200px;
-    height: 650px;
-    left: 50%;
-    transform: translate(-50%);
-    display: flex;
-    align-items: center;
-    z-index: 105;
-    transform-origin: 0 0;
-
-    div {
-      position: absolute;
-      width: 100%;
-      z-index: 1;
-      overflow: hidden;
-      transition: 0.5s ease;
-      perspective: 1000;
-      cursor: pointer;
-      -webkit-backface-visibility: hidden;
-      backface-visibility: hidden;
-      transform-style: preserve-3d;
-
-      &.activated:not(.active) {
-        opacity: 0;
-        pointer-events: none;
-      }
-
-      iframe {
-        position: absolute;
-        width: 100%;
-        height: 100%;
-        z-index: -1;
-        left: 50%;
-        border: 4px solid rgba(125, 125, 125, 0.1);
-
-        ::-webkit-scrollbar body {
-          display: none;
-        }
-      }
-    }
-
-    .computer {
-      left: 50%;
-      top: 0;
-      width: 610px;
-      height: 572px;
-      background: url(./assets/images/new-model/computer.png) no-repeat 0 0/contain;
-      transform-origin: center top;
-      transform: translate(-50%);
-
-      &.active {
-        transform: translate(-50%) scale(1.2);
-        z-index: 9999;
-      }
-
-      iframe {
-        border-radius: 25px;
-        top: 10px;
-        width: 1340px;
-        height: 876px;
-        transform-origin: center top;
-        transform: translate(-50%) scale(0.44);
-      }
-    }
-
-    .laptop {
-      top: 200px;
-      left: 0px;
-      width: 600px;
-      height: 380px;
-      background: url(./assets/images/new-model/laptop.png) no-repeat 0 0/contain;
-      transform: scale(0.9);
-
-      &.active {
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) scale(1.5);
-        z-index: 9999;
-      }
-
-      iframe {
-        border-radius: 18px 18px 5px 5px;
-        top: 10px;
-        width: 788px;
-        height: 506px;
-        transform-origin: center top;
-        transform: translate(-50%) scale(0.6);
-      }
-    }
-
-
-    .phone {
-      top: 240px;
-      z-index: 2;
-      left: 56%;
-      width: 168px;
-      height: 350px;
-      background: url(./assets/images/new-model/mobile.png) no-repeat 0 0/contain;
-      transform: scale(0.8);
-
-      &.active {
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) scale(2);
-        z-index: 9999;
-      }
-
-      iframe {
-        top: 6px;
-        width: 407px;
-        height: 877px;
-        transform-origin: center top;
-        transform: translate(calc(-50%)) scale(0.37);
-        border-radius: 60px;
-      }
-    }
-
-    .pad {
-      top: 150px;
-      left: 65%;
-      width: 300px;
-      height: 400px;
-      background: url(./assets/images/new-model/tablet.png) no-repeat 0 0/contain;
-
-      &.active {
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%) scale(2);
-        z-index: 9999;
-      }
-
-      iframe {
-        top: 10px;
-        width: 850px;
-        height: 1120px;
-        transform-origin: center top;
-        transform: translate(calc(-50%)) scale(0.332);
-        border-radius: 40px;
-      }
-    }
-  }
-  
-  .menu-trigger-area {
-    display: none;
-  }
-  
-  .mobile-menu-button {
-    display: none;
-  }
-  
-  .mobile-menu-overlay {
-    display: none;
-  }
-  
-  .mobile-menu-panel {
-    display: none;
-  }
-
-  .controls:not(iframe) {
-    position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-wrap: nowrap;
-    gap: 8px;
-    padding: 10px 16px;
+@media (max-width: 1023px) {
+  .app {
+    /* 小屏是抽屉式设置栏，回到普通文档流高度 */
     height: auto;
-    width: 653px;
-    max-width: calc(100vw - 40px);
-    color: #1a1a1a;
-    background: rgba(255, 255, 255, 0.72);
-    backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-    -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-    border: 1px solid rgba(0, 0, 0, 0.06);
-    border-radius: 20px;
-    user-select: none;
-    z-index: 10010;
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.02),
-      0 4px 12px rgba(0, 0, 0, 0.03),
-      0 12px 32px rgba(0, 0, 0, 0.04),
-      inset 0 1px 0 rgba(255, 255, 255, 0.8);
-    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-
-    .menu-indicator {
-      display: none;
-    }
-
-    .iconfont {
-      font-size: 14px;
-      color: #666;
-    }
-
-    .control-item {
-      display: flex;
-      align-items: center;
-      padding: 8px 14px;
-      background: rgba(0, 0, 0, 0.03);
-      border: 1px solid rgba(0, 0, 0, 0.06);
-      border-radius: 12px;
-      cursor: pointer;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-
-      &:hover {
-        background: rgba(0, 0, 0, 0.06);
-        border-color: rgba(0, 0, 0, 0.1);
-        transform: translateY(-1px);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-      }
-
-      &:active {
-        transform: translateY(0);
-        box-shadow: none;
-      }
-    }
-
-    .url {
-      display: flex;
-      flex-direction: column;
-      position: relative;
-
-      .website,
-      .custom span:first-child {
-        margin-right: 10px;
-      }
-
-      .website {
-        cursor: default;
-        padding: 8px 14px;
-        background: rgba(0, 0, 0, 0.03);
-        border: 1px solid rgba(0, 0, 0, 0.06);
-        border-radius: 12px;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        color: #1a1a1a;
-        font-size: 14px;
-        font-weight: 500;
-
-        &.active {
-          font-weight: 500;
-          background: rgba(0, 0, 0, 0.08);
-          border-color: rgba(0, 0, 0, 0.12);
-        }
-      }
-
-      .url-input-wrap {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        margin-left: 8px;
-
-        .url-protocol {
-          font-size: 14px;
-          color: #999;
-          white-space: nowrap;
-        }
-
-        .url-main-input {
-          width: auto;
-          min-width: 80px;
-          height: 28px;
-          padding: 4px 10px;
-          font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-          font-size: 14px;
-          color: #1a1a1a;
-          background: rgba(0, 0, 0, 0.03);
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          border-radius: 12px;
-          transition: all 0.3s ease;
-
-          &::placeholder {
-            color: #999;
-          }
-
-          &:focus {
-            outline: none;
-            background: rgba(0, 0, 0, 0.05);
-            border-color: rgba(0, 0, 0, 0.15);
-          }
-        }
-      }
-
-      .custom {
-        position: absolute;
-        top: calc(100% - 4px);
-        left: 0;
-        padding-top: 12px;
-        z-index: 10020;
-
-        .custom-inner {
-          background: rgba(255, 255, 255, 0.85);
-          backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-          -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          padding: 16px 20px;
-          box-shadow:
-            0 4px 12px rgba(0, 0, 0, 0.03),
-            0 16px 48px rgba(0, 0, 0, 0.05),
-            inset 0 1px 0 rgba(255, 255, 255, 0.8);
-          border-radius: 20px;
-          font-size: 14px;
-          color: #1a1a1a;
-          box-sizing: border-box;
-          width: 420px;
-          max-width: calc(100vw - 40px);
-        }
-
-        .custom-row {
-          display: grid;
-          grid-template-columns: 80px auto 1fr;
-          align-items: center;
-          gap: 8px;
-          padding: 5px 0;
-          min-width: 0;
-
-          .row-label {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            color: #666;
-            white-space: nowrap;
-          }
-
-          .row-protocol {
-            font-size: 13px;
-            color: #999;
-            white-space: nowrap;
-          }
-
-          input {
-            width: 100%;
-            min-width: 0;
-            box-sizing: border-box;
-          }
-        }
-
-        .close {
-          display: none;
-        }
-      }
-
-      input {
-        display: inline-block;
-        width: 120px;
-        height: 32px;
-        padding: 4px 10px;
-        margin-left: 2px;
-        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-        font-size: 14px;
-        color: #1a1a1a;
-        background: rgba(0, 0, 0, 0.03);
-        border: 1px solid rgba(0, 0, 0, 0.06);
-        border-radius: 8px;
-        transition: all 0.3s ease;
-
-        &::placeholder {
-          color: #999;
-        }
-
-        &:focus {
-          outline: none;
-          background: rgba(0, 0, 0, 0.05);
-          border-color: rgba(0, 0, 0, 0.15);
-        }
-      }
-    }
-
-    .protocol-toggle {
-      position: relative;
-      min-width: 90px;
-      justify-content: center;
-
-      .protocol-switch {
-        position: relative;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-
-        .protocol-indicator {
-          position: relative;
-          width: 36px;
-          height: 20px;
-          background: #1a1a1a;
-          border-radius: 10px;
-          transition: all 0.3s ease;
-          box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
-          flex-shrink: 0;
-
-          &::after {
-            content: '';
-            position: absolute;
-            top: 2px;
-            left: 2px;
-            width: 16px;
-            height: 16px;
-            background: white;
-            border-radius: 50%;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.15);
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-          }
-
-          &.is-http {
-            background: #c8c8c8;
-
-            &::after {
-              transform: translateX(16px);
-            }
-          }
-        }
-
-        .protocol-text {
-          font-size: 13px;
-          font-weight: 600;
-          letter-spacing: 0.5px;
-          color: #1a1a1a;
-        }
-      }
-    }
-
-    .scroll-bar {
-      label {
-        display: flex;
-        align-items: center;
-        cursor: pointer;
-        gap: 6px;
-      }
-
-      .checkbox {
-        .iconfont {
-          display: block;
-          font-size: 14px;
-          transition: all 0.2s ease;
-          color: #999;
-        }
-      }
-
-      span.text {
-        font-size: 14px;
-        color: #1a1a1a;
-      }
-    }
-
-    .position-menu {
-      position: relative;
-
-      .menu-trigger {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 14px;
-        color: #1a1a1a;
-
-        span {
-          font-weight: 500;
-        }
-      }
-
-      .menu-dropdown {
-        position: absolute;
-        top: calc(100% - 4px);
-        left: 50%;
-        transform: translateX(-50%);
-        padding-top: 12px;
-        z-index: 10020;
-        width: max-content;
-        min-width: 140px;
-
-        .menu-dropdown-inner {
-          background: rgba(255, 255, 255, 0.85);
-          backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-          -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          border-radius: 16px;
-          padding: 8px;
-          box-shadow:
-            0 4px 12px rgba(0, 0, 0, 0.03),
-            0 16px 48px rgba(0, 0, 0, 0.05),
-            inset 0 1px 0 rgba(255, 255, 255, 0.8);
-        }
-
-        .menu-item {
-          padding: 10px 14px;
-          font-size: 14px;
-          cursor: pointer;
-          border-radius: 10px;
-          transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-          color: #1a1a1a;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-
-          &:hover {
-            background: rgba(0, 0, 0, 0.06);
-            transform: translateX(2px);
-          }
-
-          .iconfont {
-            font-size: 14px;
-            color: #666;
-          }
-
-          span {
-            font-weight: 400;
-          }
-        }
-      }
-    }
+    min-height: 100vh;
+    overflow: visible;
   }
-  
-  .menu-trigger-area {
+
+  .topbar {
+    height: 58px;
+    padding: 0 14px;
+  }
+
+  .hide-sm {
     display: none;
   }
 
-  .position-box {
+  .only-sm {
+    display: grid;
+  }
+
+  .brand-text small {
+    display: none;
+  }
+
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    gap: 0;
+    align-content: center;
+    min-height: 0;
+    padding: 14px 12px 0;
+  }
+
+  .stage-shell {
+    flex: none;
+    max-width: 100%;
+  }
+
+  .view {
+    min-height: 0;
+  }
+
+  .page-foot {
+    padding: 10px 12px calc(96px + env(safe-area-inset-bottom));
+  }
+
+  .sidebar {
     position: fixed;
-    border: 3px solid #4a9eff;
-    background-color: transparent;
-    z-index: 10001;
-    cursor: move;
-    box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.3), 0 0 20px rgba(74, 158, 255, 0.4);
-
-    .position-label {
-      position: absolute;
-      top: -32px;
-      left: 0;
-      background: linear-gradient(135deg, #4a9eff 0%, #357abd 100%);
-      color: white;
-      padding: 5px 14px;
-      border-radius: 6px;
-      font-size: 12px;
-      white-space: nowrap;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-      font-weight: 500;
-      letter-spacing: 0.5px;
-    }
-
-    .corner {
-      position: absolute;
-      width: 14px;
-      height: 14px;
-      background-color: #4a9eff;
-      border: 3px solid white;
-      border-radius: 50%;
-      z-index: 10002;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-      transition: all 0.2s ease;
-
-      &:hover {
-        transform: scale(1.3);
-        background-color: #357abd;
-      }
-
-      &.top-left {
-        top: -7px;
-        left: -7px;
-        cursor: nw-resize;
-      }
-
-      &.top-right {
-        top: -7px;
-        right: -7px;
-        cursor: ne-resize;
-      }
-
-      &.bottom-left {
-        bottom: -7px;
-        left: -7px;
-        cursor: sw-resize;
-      }
-
-      &.bottom-right {
-        bottom: -7px;
-        right: -7px;
-        cursor: se-resize;
-      }
-    }
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 70;
+    height: auto;
+    max-height: 82vh;
+    border-radius: 22px 22px 0 0;
+    border-bottom: 0;
+    padding: 12px 0 calc(16px + env(safe-area-inset-bottom));
+    transform: translateY(101%);
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+    box-shadow: 0 -20px 50px -24px rgba(26, 22, 16, 0.45);
+    top: auto;
   }
 
-
-  @media screen and (max-width:1100px) {
-    .preview-box {
-      transform-origin: center 0;
-      transform: translate(-50%) scale(0.9);
-    }
+  .sidebar-head {
+    padding: 2px 18px 12px;
   }
 
-  @media screen and (max-width:1000px) {
-    .preview-box {
-      transform: translate(-50%) scale(0.8);
-    }
+  .sheet-handle {
+    display: block;
+    width: 38px;
+    height: 4px;
+    margin: 0 auto 4px;
+    border-radius: 999px;
+    background: var(--line-strong);
   }
 
-  @media screen and (max-width:900px) {
-    .preview-box {
-      transform: translate(-50%) scale(0.7);
-    }
-    
-    .controls {
-      display: none !important;
-    }
-    
-    .mobile-menu-button {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      width: 48px;
-      height: 48px;
-      background: rgba(255, 255, 255, 0.72);
-      backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-      -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-      border: 1px solid rgba(0, 0, 0, 0.06);
-      border-radius: 50%;
-      cursor: pointer;
-      z-index: 10015;
-      box-shadow:
-        0 1px 2px rgba(0, 0, 0, 0.02),
-        0 4px 12px rgba(0, 0, 0, 0.03),
-        0 12px 32px rgba(0, 0, 0, 0.04),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8);
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-
-      &:hover {
-        background: rgba(255, 255, 255, 0.9);
-        transform: scale(1.05);
-      }
-
-      &:active {
-        transform: scale(0.95);
-      }
-
-      .iconfont {
-        font-size: 22px;
-        color: #1a1a1a;
-      }
-    }
-    
-    .mobile-menu-overlay {
-      display: block;
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: rgba(0, 0, 0, 0.25);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      z-index: 10016;
-    }
-    
-    .mobile-menu-panel {
-      display: block;
-      position: fixed;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      max-height: 70vh;
-      background: rgba(255, 255, 255, 0.9);
-      backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-      -webkit-backdrop-filter: blur(40px) saturate(180%) brightness(1.05);
-      border-radius: 28px 28px 0 0;
-      z-index: 10017;
-      overflow-y: auto;
-      box-shadow:
-        0 -4px 12px rgba(0, 0, 0, 0.03),
-        0 -16px 48px rgba(0, 0, 0, 0.05),
-        inset 0 1px 0 rgba(255, 255, 255, 0.8);
-
-      .mobile-menu-content {
-        padding: 28px 20px 40px;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-
-        .url {
-          background: rgba(0, 0, 0, 0.03);
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          border-radius: 16px;
-          padding: 14px 16px;
-          color: #1a1a1a;
-
-          .default {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: nowrap;
-          }
-
-          .website {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 14px;
-            cursor: pointer;
-            white-space: nowrap;
-            flex-shrink: 0;
-            color: #1a1a1a;
-            font-weight: 500;
-          }
-
-          input {
-            flex: 1;
-            min-width: 0;
-            background: rgba(0, 0, 0, 0.03);
-            border: 1px solid rgba(0, 0, 0, 0.06);
-            border-radius: 10px;
-            padding: 8px 10px;
-            color: #1a1a1a;
-            font-size: 13px;
-            transition: all 0.2s ease;
-
-            &::placeholder {
-              color: #999;
-            }
-
-            &:focus {
-              outline: none;
-              border-color: rgba(0, 0, 0, 0.15);
-              background: rgba(0, 0, 0, 0.05);
-            }
-          }
-
-          .custom {
-            margin-top: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-
-            .custom-inner {
-              display: flex;
-              flex-direction: column;
-              gap: 10px;
-
-              .custom-row {
-                display: grid;
-                grid-template-columns: 70px auto 1fr;
-                align-items: center;
-                gap: 10px;
-                min-width: 0;
-
-                .row-label {
-                  display: flex;
-                  align-items: center;
-                  gap: 6px;
-                  font-size: 13px;
-                  color: #666;
-                  white-space: nowrap;
-                }
-
-                .row-protocol {
-                  font-size: 13px;
-                  color: #999;
-                  white-space: nowrap;
-                }
-
-                input {
-                  width: 100%;
-                  min-width: 0;
-                  background: rgba(0, 0, 0, 0.03);
-                  border: 1px solid rgba(0, 0, 0, 0.06);
-                  border-radius: 10px;
-                  padding: 8px 10px;
-                  color: #1a1a1a;
-                  font-size: 13px;
-                  transition: all 0.2s ease;
-                  box-sizing: border-box;
-
-                  &::placeholder {
-                    color: #999;
-                  }
-
-                  &:focus {
-                    outline: none;
-                    border-color: rgba(0, 0, 0, 0.15);
-                    background: rgba(0, 0, 0, 0.05);
-                  }
-                }
-              }
-            }
-
-            .close {
-              align-self: flex-end;
-              cursor: pointer;
-              padding: 8px;
-
-              .iconfont {
-                font-size: 20px;
-                color: #999;
-              }
-            }
-          }
-        }
-
-        .control-item {
-          background: rgba(0, 0, 0, 0.03);
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          border-radius: 16px;
-          padding: 14px 16px;
-          color: #1a1a1a;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          cursor: pointer;
-          transition: all 0.2s ease;
-
-          &:active {
-            transform: scale(0.98);
-            background: rgba(0, 0, 0, 0.06);
-          }
-
-          label {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            width: 100%;
-            cursor: pointer;
-
-            .checkbox {
-              display: flex;
-              align-items: center;
-
-              .iconfont {
-                font-size: 20px;
-                color: #666;
-              }
-            }
-
-            .text {
-              font-size: 15px;
-              color: #1a1a1a;
-            }
-          }
-
-          &.protocol-toggle {
-            justify-content: center;
-
-            .protocol-switch {
-              display: flex;
-              align-items: center;
-              gap: 10px;
-
-              .protocol-indicator {
-                position: relative;
-                width: 36px;
-                height: 20px;
-                background: #1a1a1a;
-                border-radius: 10px;
-                transition: all 0.3s ease;
-                box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
-                flex-shrink: 0;
-
-                &::after {
-                  content: '';
-                  position: absolute;
-                  top: 2px;
-                  left: 2px;
-                  width: 16px;
-                  height: 16px;
-                  background: white;
-                  border-radius: 50%;
-                  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
-                  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-                }
-
-                &.is-http {
-                  background: #c8c8c8;
-
-                  &::after {
-                    transform: translateX(16px);
-                  }
-                }
-              }
-
-              .protocol-text {
-                font-size: 15px;
-                font-weight: 600;
-                color: #1a1a1a;
-              }
-            }
-          }
-
-          &.position-menu {
-            flex-direction: column;
-            align-items: stretch;
-
-            .menu-trigger {
-              display: flex;
-              align-items: center;
-              gap: 10px;
-              font-size: 15px;
-              color: #1a1a1a;
-            }
-
-            .menu-dropdown {
-              position: static;
-              margin-top: 12px;
-              background: rgba(0, 0, 0, 0.04);
-              border: 1px solid rgba(0, 0, 0, 0.06);
-              border-radius: 12px;
-              padding: 4px;
-
-              .menu-item {
-                padding: 12px 14px;
-                color: #1a1a1a;
-                border-radius: 10px;
-                transition: all 0.2s ease;
-                display: flex;
-                align-items: center;
-                gap: 10px;
-
-                &:active {
-                  background: rgba(0, 0, 0, 0.08);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+  .sidebar.open {
+    transform: translateY(0);
   }
 
-  @media screen and (max-width:800px) {
-    .preview-box {
-      transform: translate(-50%) scale(0.6);
-    }
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(25, 24, 22, 0.38);
+    backdrop-filter: blur(2px);
   }
 
-  @media screen and (max-width:700px) {
-    .preview-box {
-      transform: translate(-50%) scale(0.5);
-    }
-    
-    .mobile-menu-button {
-      top: 15px;
-      right: 15px;
-      width: 45px;
-      height: 45px;
-      
-      .iconfont {
-        font-size: 22px;
-      }
-    }
-    
-    .mobile-menu-panel {
-      max-height: 75vh;
-    }
+  .dock {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    position: fixed;
+    left: 50%;
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    z-index: 60;
+    padding: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.86);
+    border: 1px solid var(--line);
+    box-shadow: 0 16px 40px -18px rgba(26, 22, 16, 0.5);
+    backdrop-filter: blur(14px);
   }
 
-  @media screen and (max-width:600px) {
-    .preview-box {
-      transform: translate(-50%) scale(0.4);
-    }
-    
-    .mobile-menu-button {
-      top: 12px;
-      right: 12px;
-      width: 42px;
-      height: 42px;
-      
-      .iconfont {
-        font-size: 20px;
-      }
-    }
-    
-    .mobile-menu-panel {
-      max-height: 80vh;
-      
-      .mobile-menu-content {
-        padding: 20px 16px 36px;
-        gap: 14px;
-      }
-    }
+  .dock-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--ink);
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.16s ease, opacity 0.16s ease;
   }
 
+  .dock-btn:active {
+    background: var(--surface-2);
+  }
 
+  .dock-btn:disabled {
+    opacity: 0.38;
+  }
 
+  .dock-btn.primary {
+    background: var(--ink);
+    color: #f7f6f3;
+  }
 
+  .foot-text {
+    font-size: 11.5px;
+  }
+
+  .toast {
+    bottom: calc(84px + env(safe-area-inset-bottom));
+  }
 }
 
+@media (max-width: 560px) {
+  .brand-text strong {
+    font-size: 13.5px;
+  }
+
+  .segmented.mode button {
+    padding: 0 9px;
+    font-size: 12px;
+  }
+
+  .stage-hint {
+    /* 小屏上画布几乎贴满卡片，气泡无处可放，交给底部 dock 的「抓取」按钮引导 */
+    display: none;
+  }
+}
 </style>
