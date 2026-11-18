@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import Icon from './components/Icon.vue'
 import PosterStage from './components/PosterStage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
-import { DEVICES, type DeviceKey, type DeviceSpec } from './lib/devices'
+import { clampPoster, DEVICES, type DeviceKey, type DeviceSpec } from './lib/devices'
 import { blobToImage, captureScreenshot, hostOf, normalizeTarget } from './lib/screenshot'
 import { downloadCanvas, renderPoster, type Shot } from './lib/poster'
 import { defaultSettings, loadSettings, saveSettings, type Settings } from './lib/settings'
@@ -96,7 +96,10 @@ function targetFor(spec: DeviceSpec): string {
 const layoutSpecs = computed<DeviceSpec[]>(() =>
   DEVICES.map((spec) => {
     const pos = settings.layout[spec.key]
-    return pos ? { ...spec, poster: { ...spec.poster, x: pos.x, y: pos.y } } : spec
+    if (!pos) return spec
+    // 存下来的旧坐标也过一遍夹取，免得老布局把设备卡在画布外
+    const { x, y } = clampPoster(spec, pos.x, pos.y)
+    return { ...spec, poster: { ...spec.poster, x, y } }
   }),
 )
 

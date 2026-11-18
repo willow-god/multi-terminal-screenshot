@@ -34,6 +34,19 @@ export interface DeviceSpec {
 
 export const POSTER = { w: 1920, h: 1080 }
 
+/**
+ * 把设备夹在画布内：画布就是 1920×1080，露出去的部分会被直接切掉，
+ * 于是出现「边框少一截 / 屏幕不显示」的假象，所以四边都只允许贴边。
+ */
+export function clampPoster(spec: DeviceSpec, x: number, y: number): { x: number; y: number } {
+  const maxX = Math.max(0, POSTER.w - spec.poster.w)
+  const maxY = Math.max(0, POSTER.h - spec.poster.h)
+  return {
+    x: Math.round(Math.min(Math.max(x, 0), maxX)),
+    y: Math.round(Math.min(Math.max(y, 0), maxY)),
+  }
+}
+
 export const DEVICES: DeviceSpec[] = [
   {
     key: 'computer',

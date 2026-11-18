@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { POSTER, type DeviceKey, type DeviceSpec } from '../lib/devices'
+import { clampPoster, POSTER, type DeviceKey, type DeviceSpec } from '../lib/devices'
 import { renderPoster, type FitMode, type Shot } from '../lib/poster'
 
 const props = defineProps<{
@@ -55,9 +55,6 @@ function screenStyle(spec: DeviceSpec) {
   }
 }
 
-/** 拖动时至少要留在画布内的边距，避免把设备甩到看不见的地方 */
-const KEEP_VISIBLE = 80
-
 interface DragState {
   key: DeviceKey
   pointerId: number
@@ -71,15 +68,6 @@ interface DragState {
 }
 
 const drag = ref<DragState | null>(null)
-
-function clampPos(spec: DeviceSpec, x: number, y: number) {
-  const keepX = Math.min(KEEP_VISIBLE, spec.poster.w)
-  const keepY = Math.min(KEEP_VISIBLE, spec.poster.h)
-  return {
-    x: Math.round(Math.min(Math.max(x, keepX - spec.poster.w), POSTER.w - keepX)),
-    y: Math.round(Math.min(Math.max(y, keepY - spec.poster.h), POSTER.h - keepY)),
-  }
-}
 
 function startDrag(event: PointerEvent, spec: DeviceSpec) {
   if (!props.editing || event.button !== 0) return
@@ -106,7 +94,7 @@ function onDrag(event: PointerEvent) {
   const spec = props.specs.find((item) => item.key === state.key)
   if (!spec) return
   // 始终按「起点 + 位移」算，避免逐帧累加带来的漂移
-  const next = clampPos(
+  const next = clampPoster(
     spec,
     state.originX + (event.clientX - state.startX) / state.scale,
     state.originY + (event.clientY - state.startY) / state.scale,
@@ -134,7 +122,7 @@ function nudge(event: KeyboardEvent, spec: DeviceSpec) {
   if (!dir) return
   event.preventDefault()
   const step = event.shiftKey ? 10 : 1
-  const next = clampPos(spec, spec.poster.x + dir[0] * step, spec.poster.y + dir[1] * step)
+  const next = clampPoster(spec, spec.poster.x + dir[0] * step, spec.poster.y + dir[1] * step)
   emit('move', spec.key, next.x, next.y)
 }
 
