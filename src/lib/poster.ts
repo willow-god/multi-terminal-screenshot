@@ -1,14 +1,16 @@
-import { POSTER, type DeviceSpec } from './devices'
+import type { DeviceSpec, PosterBox } from './devices'
 
 export type FitMode = 'cover' | 'contain'
 export type Shot = HTMLImageElement | HTMLCanvasElement
 
 export interface PosterOptions {
-  /** 导出倍率，1 = 1920×1080 */
+  /** 导出倍率，1 = 画布设计尺寸（宽 1920） */
   scale: number
   fit: FitMode
   /** 画布底色；null 表示透明 */
   background: string | null
+  /** 画布设计尺寸，宽恒为 1920、高随画布比例变化 */
+  size: PosterBox
 }
 
 const frameCache = new Map<string, Promise<HTMLImageElement>>()
@@ -266,8 +268,8 @@ function deviceCanvas(
   return canvas
 }
 
-export function posterSize(scale: number): { w: number; h: number } {
-  return { w: Math.round(POSTER.w * scale), h: Math.round(POSTER.h * scale) }
+export function exportSize(size: PosterBox, scale: number): { w: number; h: number } {
+  return { w: Math.round(size.w * scale), h: Math.round(size.h * scale) }
 }
 
 /**
@@ -307,7 +309,7 @@ export async function renderPoster(
   options: PosterOptions,
 ): Promise<void> {
   const k = options.scale
-  const size = posterSize(k)
+  const size = exportSize(options.size, k)
   canvas.width = size.w
   canvas.height = size.h
 

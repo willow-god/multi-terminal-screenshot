@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import Icon from './components/Icon.vue'
 import PosterStage from './components/PosterStage.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
-import { clampPoster, DEVICES, type DeviceKey, type DeviceSpec } from './lib/devices'
+import { BASE_H, clampPoster, DEVICES, posterSize, type DeviceKey, type DeviceSpec } from './lib/devices'
 import { blobToImage, captureScreenshot, hostOf, normalizeTarget } from './lib/screenshot'
 import { downloadCanvas, renderPoster, type Shot } from './lib/poster'
-import { defaultSettings, loadSettings, saveSettings, type Settings } from './lib/settings'
+import { defaultSettings, loadSettings, saveSettings, type Ratio, type Settings } from './lib/settings'
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -92,16 +92,95 @@ function targetFor(spec: DeviceSpec): string {
   return normalizeTarget(raw)
 }
 
-/** 拖过位置的设备由 settings.layout 覆盖默认布局，其余设备沿用 devices.ts */
-const layoutSpecs = computed<DeviceSpec[]>(() =>
-  DEVICES.map((spec) => {
-    const pos = settings.layout[spec.key]
-    if (!pos) return spec
+/** 画布设计尺寸：宽度恒为 1920，高度按当前比例算 */
+const canvasSize = computed(() => posterSize(settings.ratio))
+
+/**
+ * 拖过位置的设备由 settings.layout 覆盖默认布局（绝对坐标），其余设备沿用 devices.ts 的默认摆位；
+ * 画布比 16:9 高或矮时，默认摆位跟着画布中线走，不会一直贴在最上面。
+ */
+const layoutSpecs = computed<DeviceSpec[]>(() => {
+  const box = canvasSize.value
+  const dy = Math.round((box.h - BASE_H) / 2)
+  return DEVICES.map((spec) => {
+    const base = dy ? { ...spec, poster: { ...spec.poster, y: spec.poster.y + dy } } : spec
+    const pos = settings.layout[spec.key] ?? base.poster
     // 存下来的旧坐标也过一遍夹取，免得老布局把设备卡在画布外
-    const { x, y } = clampPoster(spec, pos.x, pos.y)
-    return { ...spec, poster: { ...spec.poster, x, y } }
-  }),
+    const { x, y } = clampPoster(base, pos.x, pos.y, box)
+    return { ...base, poster: { ...base.poster, x, y } }
+  })
+})
+
+/** 换比例时把每台设备按画布中线平移过去，构图的疏密关系保持住 */
+function setRatio(ratio: Ratio): void {
+  const before = canvasSize.value
+  const after = posterSize(ratio)
+  const dy = Math.round((after.h - before.h) / 2)
+  const shifted: Partial<Record<DeviceKey, { x: number; y: number }>> = {}
+  for (const spec of layoutSpecs.value) {
+    shifted[spec.key] = clampPoster(spec, spec.poster.x, spec.poster.y + dy, after)
+  }
+  settings.ratio = { ...ratio }
+  if (dy) settings.layout = shifted
+}
+
+/* 右侧卡片就是画布本身：按比例铺满可用区域，左栏跟着画布一样高 */
+const viewEl = ref<HTMLElement | null>(null)
+const cardBox = ref({ w: 0, h: 0 })
+const narrow = ref(false)
+
+function measureCard(): void {
+  const el = viewEl.value
+  if (!el) return
+  const ratio = canvasSize.value.w / canvasSize.value.h
+  const availW = el.clientWidth
+  const availH = el.clientHeight
+  if (!availW || !availH) return
+  let h = availH
+  let w = h * ratio
+  if (w > availW) {
+    w = availW
+    h = w / ratio
+  }
+  cardBox.value = { w: Math.round(w), h: Math.round(h) }
+}
+
+const cardStyle = computed(() =>
+  narrow.value
+    ? { aspectRatio: `${canvasSize.value.w} / ${canvasSize.value.h}` }
+    : { width: `${cardBox.value.w}px`, height: `${cardBox.value.h}px` },
 )
+
+const sidebarStyle = computed(() =>
+  narrow.value || !cardBox.value.h ? {} : { height: `${cardBox.value.h}px` },
+)
+
+const media = window.matchMedia('(max-width: 1023px)')
+let viewObserver: ResizeObserver | null = null
+
+function onMediaChange(event: MediaQueryListEvent): void {
+  narrow.value = event.matches
+  void nextTick(measureCard)
+}
+
+onMounted(() => {
+  narrow.value = media.matches
+  const el = viewEl.value
+  if (el) {
+    measureCard()
+    viewObserver = new ResizeObserver(() => measureCard())
+    viewObserver.observe(el)
+  }
+  media.addEventListener('change', onMediaChange)
+})
+
+onBeforeUnmount(() => {
+  viewObserver?.disconnect()
+  viewObserver = null
+  media.removeEventListener('change', onMediaChange)
+})
+
+watch(canvasSize, () => void nextTick(measureCard), { flush: 'post' })
 
 const enabledDevices = computed(() => layoutSpecs.value.filter((spec) => settings.enabled[spec.key]))
 const enabledCount = computed(() => enabledDevices.value.length)
@@ -255,6 +334,7 @@ async function exportPoster(): Promise<void> {
       scale: settings.scale,
       fit: settings.fit,
       background: settings.background,
+      size: canvasSize.value,
     })
     const host = hostOf(targetFor(specs[0])).replace(/^www\./, '').split(':')[0] || 'poster'
     await downloadCanvas(canvas, `${host}-${stamp()}.png`)
@@ -358,7 +438,7 @@ function urlFor(spec: DeviceSpec): string {
     </header>
 
     <main class="workspace">
-      <aside class="sidebar" :class="{ open: sheetOpen }">
+      <aside class="sidebar" :class="{ open: sheetOpen }" :style="sidebarStyle">
         <span class="sheet-handle" />
         <div class="sidebar-head">
           <h2>设置</h2>
@@ -375,15 +455,17 @@ function urlFor(spec: DeviceSpec): string {
           :busy="busy"
           :mode="settings.mode"
           @upload="onUpload"
+          @ratio="setRatio"
         />
       </aside>
 
       <div v-if="sheetOpen" class="scrim" @click="sheetOpen = false" />
 
-      <section class="view">
-        <div class="stage-shell">
+      <section ref="viewEl" class="view">
+        <div class="stage-shell" :style="cardStyle">
           <PosterStage
             :mode="settings.mode"
+            :size="canvasSize"
             :specs="enabledDevices"
             :shots="shotMap"
             :url-for="urlFor"
@@ -414,10 +496,10 @@ function urlFor(spec: DeviceSpec): string {
       </span>
       <span v-if="!editingLayout" class="foot-text">
         <template v-if="settings.mode === 'api' && settings.provider === 'xxapi'">
-          1920 × 1080 画布 · 截图由 XXAPI 实时渲染
+          {{ canvasSize.w }} × {{ canvasSize.h }} 画布 · 截图由 XXAPI 实时渲染
         </template>
         <template v-else-if="settings.mode === 'api'">
-          1920 × 1080 画布 · 截图由 WordPress mshots 渲染，首次约几秒、缓存 12 小时
+          {{ canvasSize.w }} × {{ canvasSize.h }} 画布 · 截图由 WordPress mshots 渲染，首次约几秒、缓存 12 小时
         </template>
         <template v-else>实时加载目标站点，受 X-Frame-Options / CSP 限制时可能空白，不支持导出</template>
       </span>
@@ -550,6 +632,7 @@ function urlFor(spec: DeviceSpec): string {
 .sidebar {
   display: flex;
   flex-direction: column;
+  align-self: center;
   padding: 0;
   border-radius: 18px;
   background: var(--surface);
@@ -634,14 +717,16 @@ function urlFor(spec: DeviceSpec): string {
 
 .view {
   display: flex;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
   min-height: 0;
 }
 
 .stage-shell {
-  flex: 1;
+  /* 尺寸由画布比例算出来写在内联样式里，不再跟着栅格拉伸 */
+  flex: none;
   position: relative;
-  width: 100%;
   min-width: 0;
   min-height: 0;
   border-radius: 20px;
@@ -794,6 +879,7 @@ function urlFor(spec: DeviceSpec): string {
 
   .stage-shell {
     flex: none;
+    width: 100%;
     max-width: 100%;
   }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { clampPoster, POSTER, type DeviceKey, type DeviceSpec } from '../lib/devices'
+import { clampPoster, type DeviceKey, type DeviceSpec, type PosterBox } from '../lib/devices'
 import { renderPoster, type FitMode, type Shot } from '../lib/poster'
 
 const props = defineProps<{
@@ -10,6 +10,8 @@ const props = defineProps<{
   urlFor: (spec: DeviceSpec) => string
   background: string | null
   fit: FitMode
+  /** 画布设计尺寸（宽恒为 1920，高随比例变化） */
+  size: PosterBox
   /** 布局编辑态：铺一层可拖动的手柄 */
   editing?: boolean
 }>()
@@ -74,7 +76,7 @@ function startDrag(event: PointerEvent, spec: DeviceSpec) {
   const stage = stageEl.value
   if (!stage) return
   event.preventDefault()
-  const scale = stage.getBoundingClientRect().width / POSTER.w || 1
+  const scale = stage.getBoundingClientRect().width / props.size.w || 1
   drag.value = {
     key: spec.key,
     pointerId: event.pointerId,
@@ -98,6 +100,7 @@ function onDrag(event: PointerEvent) {
     spec,
     state.originX + (event.clientX - state.startX) / state.scale,
     state.originY + (event.clientY - state.startY) / state.scale,
+    props.size,
   )
   emit('move', state.key, next.x, next.y)
 }
@@ -122,7 +125,7 @@ function nudge(event: KeyboardEvent, spec: DeviceSpec) {
   if (!dir) return
   event.preventDefault()
   const step = event.shiftKey ? 10 : 1
-  const next = clampPoster(spec, spec.poster.x + dir[0] * step, spec.poster.y + dir[1] * step)
+  const next = clampPoster(spec, spec.poster.x + dir[0] * step, spec.poster.y + dir[1] * step, props.size)
   emit('move', spec.key, next.x, next.y)
 }
 
@@ -137,6 +140,7 @@ async function paint(): Promise<void> {
     scale: 1,
     fit: props.fit,
     background: props.background,
+    size: props.size,
   })
 }
 
@@ -163,7 +167,14 @@ function draw(): void {
 }
 
 watch(
-  () => [props.mode, props.specs, props.background, props.fit, props.specs.map((s) => props.shots[s.key])],
+  () => [
+    props.mode,
+    props.specs,
+    props.background,
+    props.fit,
+    props.size,
+    props.specs.map((s) => props.shots[s.key]),
+  ],
   () => {
     void draw()
   },
@@ -173,19 +184,26 @@ watch(
 
 let observer: ResizeObserver | null = null
 
+/** 卡片显示尺寸 → 设计坐标的缩放比 */
+function measureStage(): void {
+  const el = wrapEl.value
+  if (!el) return
+  const w = el.clientWidth / props.size.w
+  const h = el.clientHeight / props.size.h
+  stageScale.value = Math.max(0.01, Math.min(w, h))
+}
+
 onMounted(() => {
   const el = wrapEl.value
   if (!el) return
-  const measure = () => {
-    const w = el.clientWidth / POSTER.w
-    const h = el.clientHeight / POSTER.h
-    stageScale.value = Math.max(0.01, Math.min(w, h))
-  }
-  measure()
+  measureStage()
   void draw()
-  observer = new ResizeObserver(measure)
+  observer = new ResizeObserver(measureStage)
   observer.observe(el)
 })
+
+// 换画布比例后画布尺寸变了，重新量一次缩放比
+watch(() => props.size, measureStage, { flush: 'post' })
 
 onBeforeUnmount(() => {
   observer?.disconnect()
@@ -204,9 +222,14 @@ onBeforeUnmount(() => {
       ref="stageEl"
       class="stage"
       :class="{ 'is-transparent': background === null }"
-      :style="{ background: background || undefined, transform: `translate(-50%, -50%) scale(${stageScale})` }"
+      :style="{
+        width: `${size.w}px`,
+        height: `${size.h}px`,
+        background: background || undefined,
+        transform: `translate(-50%, -50%) scale(${stageScale})`,
+      }"
     >
-      <canvas v-if="mode === 'api'" ref="canvasEl" class="poster" width="1920" height="1080" />
+      <canvas v-if="mode === 'api'" ref="canvasEl" class="poster" :width="size.w" :height="size.h" />
 
       <template v-else>
         <div v-for="spec in ordered" :key="spec.key" class="device" :style="deviceStyle(spec)">
@@ -257,19 +280,14 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
   border-radius: inherit;
-  /* 画布之外的桌面，颜色比画布本身深一档，1920×1080 的边界才看得出来 */
-  background: #e7e2d7;
 }
 
-/* 画布：1920×1080 的那张纸，投影只画在纸上，导出的图里没有 */
+/* 画布 = 整张卡片，尺寸由比例算出来，导出的图就是这块 */
 .stage {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 1920px;
-  height: 1080px;
   transform-origin: center center;
-  box-shadow: 0 0 0 1px rgba(25, 24, 22, 0.09), 0 28px 70px -34px rgba(25, 24, 22, 0.6);
 }
 
 .stage.is-transparent {
@@ -282,17 +300,10 @@ onBeforeUnmount(() => {
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
 }
 
-@media (max-width: 1023px) {
-  .stage-wrap {
-    height: auto;
-    aspect-ratio: 16 / 9;
-  }
-}
-
 .poster {
   display: block;
-  width: 1920px;
-  height: 1080px;
+  width: 100%;
+  height: 100%;
 }
 
 .device {

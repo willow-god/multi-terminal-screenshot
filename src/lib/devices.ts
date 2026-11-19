@@ -38,20 +38,47 @@ export interface DeviceSpec {
   art: Rect
 }
 
-export const POSTER = { w: 1920, h: 1080 }
+/** 画布设计宽度固定 1920；高度由比例决定，设备坐标都在这个设计空间里 */
+export const POSTER_W = 1920
+/** 16:9 时的高度，设备默认布局是按这个高度摆的 */
+export const BASE_H = 1080
+/** 比例的可选范围（宽 / 高）：太窄太长会导出几千万像素的位图 */
+export const RATIO_MIN = 0.5
+export const RATIO_MAX = 4
+
+export interface PosterBox {
+  w: number
+  h: number
+}
+
+export function clampRatio(value: number): number {
+  return Math.min(Math.max(value, RATIO_MIN), RATIO_MAX)
+}
+
+/** 比例 → 画布设计尺寸：宽度恒为 1920，高度按比例算 */
+export function posterSize(ratio: { w: number; h: number }): PosterBox {
+  const w = Number.isFinite(ratio.w) && ratio.w > 0 ? ratio.w : 16
+  const h = Number.isFinite(ratio.h) && ratio.h > 0 ? ratio.h : 9
+  return { w: POSTER_W, h: Math.round(POSTER_W / clampRatio(w / h)) }
+}
 
 /**
- * 把设备夹在画布里：画布就是 1920×1080，露出去的部分会被直接切掉，
+ * 把设备夹在画布里：画布就是整张海报，露出去的部分会被直接切掉，
  * 于是出现「边框少一截 / 屏幕不显示」的假象。
  * 边界按看得见的本体（art）算，底图自带的那圈透明边可以露到画布外，
  * 这样设备既能贴到边上，又不会真的缺一块。
  */
-export function clampPoster(spec: DeviceSpec, x: number, y: number): { x: number; y: number } {
+export function clampPoster(
+  spec: DeviceSpec,
+  x: number,
+  y: number,
+  box: PosterBox,
+): { x: number; y: number } {
   const { art } = spec
   const minX = -art.x
-  const maxX = Math.max(minX, POSTER.w - art.x - art.w)
+  const maxX = Math.max(minX, box.w - art.x - art.w)
   const minY = -art.y
-  const maxY = Math.max(minY, POSTER.h - art.y - art.h)
+  const maxY = Math.max(minY, box.h - art.y - art.h)
   return {
     x: Math.round(Math.min(Math.max(x, minX), maxX)),
     y: Math.round(Math.min(Math.max(y, minY), maxY)),

@@ -2,7 +2,15 @@
 import { computed, ref } from 'vue'
 import Icon from './Icon.vue'
 import { DEVICES, type DeviceKey, type DeviceSpec } from '../lib/devices'
-import { BACKGROUNDS, type Settings } from '../lib/settings'
+import {
+  BACKGROUNDS,
+  fitRatio,
+  normRatioPart,
+  RATIO_PRESETS,
+  sameRatio,
+  type Ratio,
+  type Settings,
+} from '../lib/settings'
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -15,6 +23,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'upload', key: DeviceKey, file: File): void
+  /** 换画布比例（App 会顺带把设备按中线挪过去） */
+  (event: 'ratio', ratio: Ratio): void
 }>()
 
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -26,6 +36,20 @@ const API_KEY_URL = 'https://xxapi.cn/admin/api-keys'
 const PROXY_GUIDE_URL = 'https://gist.liushen.fun/LiuShen/cf-nginx'
 /** XXAPI 的密钥（含 uak_ 前缀）最多 32 位，超了服务端会直接判为「参数不合法」 */
 const keyTooLong = computed(() => props.settings.apiKey.trim().length > 32)
+
+function pickRatio(ratio: Ratio): void {
+  if (sameRatio(props.settings.ratio, ratio)) return
+  emit('ratio', ratio)
+}
+
+/** 手填比例：失焦或回车才生效，免得输入过程中被夹成 1 */
+function onRatioInput(part: 'w' | 'h', event: Event): void {
+  const input = event.target as HTMLInputElement
+  const next = fitRatio({ ...props.settings.ratio, [part]: normRatioPart(input.value) })
+  input.value = String(next[part])
+  if (sameRatio(props.settings.ratio, next)) return
+  emit('ratio', next)
+}
 
 const STATUS_TEXT: Record<Status, string> = {
   idle: '未抓取',
@@ -212,6 +236,48 @@ function onCustomColor(event: Event): void {
 
     <section class="group">
       <h3 class="group-title">画布</h3>
+
+      <div class="row">
+        <span class="row-label">比例</span>
+        <div class="ratio-field">
+          <input
+            class="ratio-input"
+            type="number"
+            min="1"
+            max="99"
+            step="1"
+            inputmode="numeric"
+            :value="settings.ratio.w"
+            aria-label="画布比例宽"
+            @change="onRatioInput('w', $event)"
+          />
+          <span class="ratio-colon">:</span>
+          <input
+            class="ratio-input"
+            type="number"
+            min="1"
+            max="99"
+            step="1"
+            inputmode="numeric"
+            :value="settings.ratio.h"
+            aria-label="画布比例高"
+            @change="onRatioInput('h', $event)"
+          />
+        </div>
+      </div>
+      <div class="ratio-presets">
+        <button
+          v-for="item in RATIO_PRESETS"
+          :key="item.label"
+          type="button"
+          class="ratio-chip"
+          :class="{ active: sameRatio(settings.ratio, item.ratio) }"
+          @click="pickRatio(item.ratio)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
+
       <div class="swatches">
         <button
           v-for="item in BACKGROUNDS"
@@ -593,5 +659,72 @@ function onCustomColor(event: Event): void {
 .row-label {
   font-size: 13px;
   color: var(--muted);
+}
+
+.ratio-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ratio-input {
+  width: 52px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: center;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.ratio-input::-webkit-outer-spin-button,
+.ratio-input::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.ratio-input:focus {
+  outline: none;
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.ratio-colon {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.ratio-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ratio-chip {
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+}
+
+.ratio-chip:hover {
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.ratio-chip.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #f7f6f3;
 }
 </style>
