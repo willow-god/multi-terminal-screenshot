@@ -199,13 +199,12 @@ onBeforeUnmount(() => {
   <div
     ref="wrapEl"
     class="stage-wrap"
-    :class="{ 'is-transparent': background === null }"
-    :style="background ? { background } : undefined"
   >
     <div
       ref="stageEl"
       class="stage"
-      :style="{ transform: `translate(-50%, -50%) scale(${stageScale})` }"
+      :class="{ 'is-transparent': background === null }"
+      :style="{ background: background || undefined, transform: `translate(-50%, -50%) scale(${stageScale})` }"
     >
       <canvas v-if="mode === 'api'" ref="canvasEl" class="poster" width="1920" height="1080" />
 
@@ -258,19 +257,11 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: hidden;
   border-radius: inherit;
-  background: #fbfaf8;
+  /* 画布之外的桌面，颜色比画布本身深一档，1920×1080 的边界才看得出来 */
+  background: #e7e2d7;
 }
 
-.stage-wrap.is-transparent {
-  background-color: #ffffff;
-  background-image: linear-gradient(45deg, rgba(25, 24, 22, 0.05) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(25, 24, 22, 0.05) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(25, 24, 22, 0.05) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(25, 24, 22, 0.05) 75%);
-  background-size: 24px 24px;
-  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
-}
-
+/* 画布：1920×1080 的那张纸，投影只画在纸上，导出的图里没有 */
 .stage {
   position: absolute;
   top: 50%;
@@ -278,6 +269,17 @@ onBeforeUnmount(() => {
   width: 1920px;
   height: 1080px;
   transform-origin: center center;
+  box-shadow: 0 0 0 1px rgba(25, 24, 22, 0.09), 0 28px 70px -34px rgba(25, 24, 22, 0.6);
+}
+
+.stage.is-transparent {
+  background-color: #ffffff;
+  background-image: linear-gradient(45deg, rgba(25, 24, 22, 0.05) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(25, 24, 22, 0.05) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(25, 24, 22, 0.05) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(25, 24, 22, 0.05) 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
 }
 
 @media (max-width: 1023px) {
