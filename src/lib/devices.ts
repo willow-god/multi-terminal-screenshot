@@ -30,20 +30,31 @@ export interface DeviceSpec {
   outputWidth: number
   /** 海报中的位置，1920×1080 设计空间 */
   poster: Rect & { layer: number }
+  /**
+   * 设备「看得见的部分」在 poster 矩形里的位置，单位同 poster。
+   * 底图四周留了一圈透明边（给阴影渐变用），拖拽时按这块算边界，
+   * 设备才能真的贴到画布边上，而不是被那圈空白挡住。
+   */
+  art: Rect
 }
 
 export const POSTER = { w: 1920, h: 1080 }
 
 /**
- * 把设备夹在画布内：画布就是 1920×1080，露出去的部分会被直接切掉，
- * 于是出现「边框少一截 / 屏幕不显示」的假象，所以四边都只允许贴边。
+ * 把设备夹在画布里：画布就是 1920×1080，露出去的部分会被直接切掉，
+ * 于是出现「边框少一截 / 屏幕不显示」的假象。
+ * 边界按看得见的本体（art）算，底图自带的那圈透明边可以露到画布外，
+ * 这样设备既能贴到边上，又不会真的缺一块。
  */
 export function clampPoster(spec: DeviceSpec, x: number, y: number): { x: number; y: number } {
-  const maxX = Math.max(0, POSTER.w - spec.poster.w)
-  const maxY = Math.max(0, POSTER.h - spec.poster.h)
+  const { art } = spec
+  const minX = -art.x
+  const maxX = Math.max(minX, POSTER.w - art.x - art.w)
+  const minY = -art.y
+  const maxY = Math.max(minY, POSTER.h - art.y - art.h)
   return {
-    x: Math.round(Math.min(Math.max(x, 0), maxX)),
-    y: Math.round(Math.min(Math.max(y, 0), maxY)),
+    x: Math.round(Math.min(Math.max(x, minX), maxX)),
+    y: Math.round(Math.min(Math.max(y, minY), maxY)),
   }
 }
 
@@ -59,6 +70,7 @@ export const DEVICES: DeviceSpec[] = [
     viewport: { w: 1280, h: 840 },
     outputWidth: 1920,
     poster: { x: 506, y: 36, w: 1064, h: 1008, layer: 0 },
+    art: { x: 65, y: 79, w: 934, h: 797 },
   },
   {
     key: 'tablet',
@@ -71,6 +83,7 @@ export const DEVICES: DeviceSpec[] = [
     viewport: { w: 720, h: 960 },
     outputWidth: 1440,
     poster: { x: 1337, y: 381, w: 490, h: 620, layer: 1 },
+    art: { x: 41, y: 42, w: 408, h: 553 },
   },
   {
     key: 'laptop',
@@ -83,6 +96,7 @@ export const DEVICES: DeviceSpec[] = [
     viewport: { w: 1280, h: 805 },
     outputWidth: 1920,
     poster: { x: 85, y: 462, w: 849, h: 544, layer: 2 },
+    art: { x: 46, y: 45, w: 756, h: 457 },
   },
   {
     key: 'phone',
@@ -95,6 +109,7 @@ export const DEVICES: DeviceSpec[] = [
     viewport: { w: 390, h: 844 },
     outputWidth: 780,
     poster: { x: 1218, y: 498, w: 260, h: 483, layer: 3 },
+    art: { x: 24, y: 22, w: 212, h: 447 },
   },
 ]
 
